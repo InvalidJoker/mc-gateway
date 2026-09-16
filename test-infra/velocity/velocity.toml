@@ -1,0 +1,21 @@
+# Velocity running behind mc-gateway.
+config-version = "2.7"
+bind = "0.0.0.0:25577"
+motd = "velocity behind the gateway"
+show-max-players = 100
+online-mode = false
+player-info-forwarding-mode = "legacy"
+
+# This is the line that matters: Velocity reads the PROXY header the gateway
+# writes, so it sees the real player IP instead of the gateway's.
+haproxy-protocol = true
+
+[servers]
+lobby = "paper:25565"
+try = ["lobby"]
+
+[advanced]
+compression-threshold = 256
+
+[query]
+enabled = false

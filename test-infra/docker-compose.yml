@@ -1,0 +1,100 @@
+# A network to test the gateway against real server software.
+#
+# Only the gateway publishes a port. The backends sit on an internal network,
+# exactly as they should in production — which also means this compose file
+# fails loudly if the gateway ever stops being the only way in.
+#
+#   docker compose up -d
+#   python3 smoke.py docker compose exec ...   # or point a client at :25565
+
+name: mc-gateway-test
+
+services:
+  gateway:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    ports:
+      - "25565:25565"
+      - "127.0.0.1:9100:9100"
+    volumes:
+      - ./gateway/config.yaml:/etc/mc-gateway/config.yaml:ro
+    networks: [edge, backend]
+    depends_on: [vanilla, paper, velocity]
+    restart: unless-stopped
+
+  # Vanilla cannot read a PROXY header. On Linux it would use TPROXY; in this
+  # compose file it runs with `forwarding: none`, which still proves routing,
+  # MOTD and the pipe.
+  vanilla:
+    image: itzg/minecraft-server:latest
+    environment:
+      EULA: "TRUE"
+      TYPE: VANILLA
+      VERSION: "1.21.1"
+      ONLINE_MODE: "FALSE"
+      MEMORY: 1G
+    networks: [backend]
+    volumes: [vanilla-data:/data]
+
+  # Paper reads the PROXY protocol once `settings.proxy-protocol: true` is set
+  # in spigot.yml. The container writes that file on first start, so set it
+  # afterwards and restart:
+  #   docker compose exec paper sed -i 's/proxy-protocol: false/proxy-protocol: true/' /data/spigot.yml
+  paper:
+    image: itzg/minecraft-server:latest
+    environment:
+      EULA: "TRUE"
+      TYPE: PAPER
+      VERSION: "1.21.1"
+      ONLINE_MODE: "FALSE"
+      MEMORY: 1G
+    networks: [backend]
+    volumes: [paper-data:/data]
+
+  # Velocity behind the gateway: a proxy behind a proxy, which is the case the
+  # forwarding rules have to get right.
+  velocity:
+    image: itzg/bungeecord:latest
+    environment:
+      TYPE: VELOCITY
+    volumes:
+      - ./velocity/velocity.toml:/server/velocity.toml:ro
+      - velocity-data:/server
+    networks: [backend]
+
+  fabric:
+    image: itzg/minecraft-server:latest
+    environment:
+      EULA: "TRUE"
+      TYPE: FABRIC
+      VERSION: "1.21.1"
+      ONLINE_MODE: "FALSE"
+      MEMORY: 1G
+    networks: [backend]
+    volumes: [fabric-data:/data]
+    profiles: [modded]
+
+  neoforge:
+    image: itzg/minecraft-server:latest
+    environment:
+      EULA: "TRUE"
+      TYPE: NEOFORGE
+      VERSION: "1.21.1"
+      ONLINE_MODE: "FALSE"
+      MEMORY: 2G
+    networks: [backend]
+    volumes: [neoforge-data:/data]
+    profiles: [modded]
+
+networks:
+  edge:
+  backend:
+    internal: true
+
+volumes:
+  vanilla-data:
+  paper-data:
+  velocity-data:
+  fabric-data:
+  neoforge-data:

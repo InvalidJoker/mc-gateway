@@ -1,0 +1,152 @@
+# mc-gateway — example configuration
+#
+# The gateway is the only thing exposed to the internet. Backends listen on a
+# private network and accept connections from the gateway only.
+
+listeners:
+  - name: public
+    bind: "0.0.0.0:25565"
+
+    # If an L4 load balancer or router sits in front of the gateway and speaks
+    # the PROXY protocol, enable this so the real client IP survives that hop.
+    # `trusted` is mandatory: without it anyone could claim any source IP.
+    proxy_protocol:
+      enabled: false
+      trusted: ["10.0.0.0/8"]
+      required: false
+
+# ---------------------------------------------------------------------------
+# Routing: the hostname from the Minecraft handshake decides the backend.
+# Forge/NeoForge markers and SRV trailing dots are stripped before matching.
+# ---------------------------------------------------------------------------
+routing:
+  # Used when nothing matches. Remove it to refuse unknown hostnames outright.
+  default: survival
+
+  rules:
+    - host: "survival.example.net"
+      target: survival            # a group — load balanced across its members
+
+    - host: "creative.example.net"
+      target: creative-01         # a single server
+
+    - host: "modded.example.net"
+      target: modded-01
+      motd:                       # per-route MOTD overlay
+        text: |
+          &6Modded &8» &fNeoForge 1.21
+          &7Modpack v4 required
+
+    - host: "*.play.example.net"  # any subdomain, and the bare domain too
+      target: survival
+
+    - host: "proxy.example.net"   # a Velocity proxy behind the gateway
+      target: proxy-01
+
+# ---------------------------------------------------------------------------
+# Servers. Add 300 of them here, or push them in over the control API later.
+# ---------------------------------------------------------------------------
+servers:
+  survival-01:
+    address: "10.10.1.10:25565"
+    group: survival
+    kind: paper
+    forwarding: proxy_protocol_v2   # Paper: proxy-protocol: true in spigot.yml
+    weight: 1
+
+  survival-02:
+    address: "10.10.1.11:25565"
+    group: survival
+    kind: paper
+    forwarding: proxy_protocol_v2
+    weight: 1
+    max_connections: 200
+
+  creative-01:
+    address: "10.10.1.20:25565"
+    kind: paper
+    forwarding: proxy_protocol_v2
+
+  # Vanilla and the modloaders cannot read a PROXY header. On Linux, TPROXY
+  # gives them the real client IP with no server-side support at all.
+  # Everywhere else, leave forwarding at `none`.
+  modded-01:
+    address: "10.10.2.10:25565"
+    kind: neoforge
+    forwarding: none
+
+  # A Velocity proxy behind the gateway: it reads the header natively
+  # (haproxy-protocol = true) and does player authentication itself.
+  proxy-01:
+    address: "10.10.3.10:25565"
+    kind: velocity
+    forwarding: proxy_protocol_v2
+
+groups:
+  survival:
+    policy: least_connections     # round_robin | least_connections | failover
+
+# ---------------------------------------------------------------------------
+# The gateway answers status pings itself, so the server list stays up even
+# when every backend is down or restarting.
+# ---------------------------------------------------------------------------
+motd:
+  enabled: true
+  text: |
+    &b&lMY NETWORK &8» &71.8 &8- &71.21
+    &7survival &8• &7creative &8• &7modded
+  version_name: "MyNetwork"
+  # `auto` echoes the client's own protocol number so the client never draws
+  # the red "incompatible version" cross. A fixed number does the opposite.
+  protocol: auto
+  max_players: 1000
+  players: sessions               # sessions | static | backends
+  sample:
+    - "&bWelcome to My Network"
+    - "&7play.example.net"
+  # favicon: "./favicon.png"      # 64x64 PNG
+  enforces_secure_chat: false
+  offline:
+    text: "&cCurrently offline &8• &7back soon"
+    mark_incompatible: true
+
+messages:
+  no_route: "&cUnknown server address"
+  backend_offline: "&cThis server is currently offline"
+  backend_error: "&cCould not reach the server, please try again"
+  rate_limited: "&cToo many connection attempts, slow down"
+  too_many_connections: "&cThe network is full, please try again later"
+
+limits:
+  max_connections: 20000
+  max_connections_per_ip: 8
+  connection_rate:
+    burst: 30
+    per: 60s
+  max_handshake_bytes: 8192
+  exempt: ["127.0.0.1/32"]
+
+timeouts:
+  handshake: 5s
+  status: 10s
+  connect: 3s
+  idle: 600s
+  drain: 30s
+
+health:
+  enabled: true
+  method: status                  # tcp | status
+  interval: 10s
+  timeout: 2s
+  rise: 2
+  fall: 3
+  start_healthy: true
+
+metrics:
+  enabled: true
+  bind: "127.0.0.1:9100"
+
+log:
+  level: info
+  format: text                    # text | json
+  client_ip: true

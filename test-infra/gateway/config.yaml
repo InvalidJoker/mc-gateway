@@ -1,0 +1,72 @@
+# Gateway configuration for the docker compose test network.
+
+listeners:
+  - name: public
+    bind: "0.0.0.0:25565"
+
+routing:
+  default: paper
+  rules:
+    - host: "vanilla.localhost"
+      target: vanilla
+    - host: "paper.localhost"
+      target: paper
+    - host: "velocity.localhost"
+      target: velocity
+    - host: "fabric.localhost"
+      target: fabric
+    - host: "neoforge.localhost"
+      target: neoforge
+
+servers:
+  vanilla:
+    address: "vanilla:25565"
+    kind: vanilla
+    forwarding: none          # vanilla cannot read a header; TPROXY or nothing
+
+  paper:
+    address: "paper:25565"
+    kind: paper
+    # Requires `settings.proxy-protocol: true` in the container's spigot.yml.
+    forwarding: none
+
+  velocity:
+    address: "velocity:25577"
+    kind: velocity
+    # Matches `haproxy-protocol = true` in velocity.toml.
+    forwarding: proxy_protocol_v2
+
+  fabric:
+    address: "fabric:25565"
+    kind: fabric
+    forwarding: none
+
+  neoforge:
+    address: "neoforge:25565"
+    kind: neoforge
+    forwarding: none
+
+motd:
+  enabled: true
+  text: |
+    &b&lMC-GATEWAY &8» &7test network
+    &7vanilla &8• &7paper &8• &7velocity &8• &7modded
+  version_name: "mc-gateway"
+  protocol: auto
+  max_players: 100
+  players: sessions
+
+limits:
+  max_connections_per_ip: 0   # everything comes from the docker bridge IP
+
+health:
+  method: status
+  interval: 10s
+  timeout: 3s
+
+metrics:
+  enabled: true
+  bind: "0.0.0.0:9100"        # published on loopback only by compose
+
+log:
+  level: debug
