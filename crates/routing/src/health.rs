@@ -1,10 +1,10 @@
 //! Background health checks.
 //!
 //! The point is not to know precisely when a server died, it is to keep dead
-//! servers out of the selection pool and to keep the public MOTD answering even
-//! when every backend is gone.
+//! servers out of the selection pool and to give the gateway something honest
+//! to say when a route has nowhere to send a player.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use mc_config::HealthMethod;
 use mc_forwarding::Origin;
@@ -30,9 +30,9 @@ pub async fn run(registry: Arc<Registry>, mut shutdown: watch::Receiver<bool>) {
         let backend = Arc::clone(backend);
         let shutdown = shutdown.clone();
         let offset = if total > 0 {
-            backend.health_config.interval.get().mul_f64(index as f64 / total as f64)
+            backend.health_config.interval.mul_f64(index as f64 / total as f64)
         } else {
-            std::time::Duration::ZERO
+            Duration::ZERO
         };
         tasks.spawn(check_loop(backend, offset, shutdown));
     }
@@ -67,7 +67,7 @@ async fn wait_for_shutdown(rx: &mut watch::Receiver<bool>) {
 
 async fn check_loop(
     backend: Arc<Backend>,
-    offset: std::time::Duration,
+    offset: Duration,
     mut shutdown: watch::Receiver<bool>,
 ) {
     if !offset.is_zero() {
@@ -77,7 +77,7 @@ async fn check_loop(
         }
     }
 
-    let mut ticker = time::interval(backend.health_config.interval.get());
+    let mut ticker = time::interval(backend.health_config.interval);
     // A slow backend must not cause a burst of catch-up probes.
     ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
 
@@ -114,26 +114,35 @@ async fn check_loop(
 
 /// One probe. `Ok(None)` means a TCP-only check succeeded.
 async fn check_once(backend: &Backend) -> Result<Option<StatusSnapshot>, String> {
-    let timeout = backend.health_config.timeout.get();
+    let deadline = backend.health_config.timeout;
 
     let address = mc_forwarding::resolve(&backend.address).await.map_err(|e| e.to_string())?;
-    // The probe uses the same forwarding mode as real sessions, so a backend
-    // that only accepts PROXY-protocol connections is checked the way it is
-    // actually used. `Origin::Gateway` makes that a LOCAL header, never a
-    // fabricated client address.
-    let mut stream =
-        mc_forwarding::connect(address, backend.forwarding, Origin::Gateway, timeout)
-            .await
-            .map_err(|e| e.to_string())?;
+    // `Origin::Gateway`: a probe is the gateway's own connection and never
+    // borrows a player's address, even where transparent forwarding is in use.
+    let mut stream = mc_forwarding::connect(address, Origin::Gateway, deadline)
+        .await
+        .map_err(|e| e.to_string())?;
 
     match backend.health_config.method {
         HealthMethod::Tcp => Ok(None),
         HealthMethod::Status => {
             let (host, port) = mc_config::split_host_port(&backend.address)?;
-            crate::ping::status_ping(&mut stream, host, port, timeout)
+            let started = time::Instant::now();
+
+            // craftping speaks both the modern and the pre-1.7 ping, so a very
+            // old backend still reports its player counts.
+            let response = time::timeout(deadline, craftping::tokio::ping(&mut stream, host, port))
                 .await
-                .map(Some)
-                .map_err(|e| e.to_string())
+                .map_err(|_| "status ping timed out".to_owned())?
+                .map_err(|err| err.to_string())?;
+
+            Ok(Some(StatusSnapshot {
+                online: response.online_players as i64,
+                max: response.max_players as i64,
+                version: response.version,
+                protocol: response.protocol,
+                latency: started.elapsed(),
+            }))
         }
     }
 }
@@ -179,7 +188,7 @@ health:
             if !backend.is_healthy() {
                 break;
             }
-            time::sleep(std::time::Duration::from_millis(20)).await;
+            time::sleep(Duration::from_millis(20)).await;
         }
         assert!(!backend.is_healthy(), "an unreachable backend must be marked down");
 
@@ -199,10 +208,13 @@ health:
                     let mut buf = vec![0u8; 512];
                     let _ = stream.read(&mut buf).await;
                     let json = r#"{"version":{"name":"Paper","protocol":767},
-                                   "players":{"max":50,"online":12}}"#;
+                                   "players":{"max":50,"online":12},
+                                   "description":{"text":"hi"}}"#;
                     let _ = stream
                         .write_all(&mc_protocol::status::encode_status_response(json))
                         .await;
+                    let _ = stream.flush().await;
+                    time::sleep(Duration::from_millis(200)).await;
                 });
             }
         });
@@ -238,12 +250,14 @@ health:
             if backend.is_healthy() {
                 break;
             }
-            time::sleep(std::time::Duration::from_millis(20)).await;
+            time::sleep(Duration::from_millis(20)).await;
         }
 
         assert!(backend.is_healthy());
         let status = backend.status().expect("a status check records a snapshot");
         assert_eq!(status.online, 12);
+        assert_eq!(status.max, 50);
+        assert_eq!(status.version, "Paper");
         assert_eq!(registry.reported_players(), 12);
 
         tx.send(true).unwrap();

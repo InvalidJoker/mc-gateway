@@ -1,5 +1,5 @@
 #!/bin/sh
-# Routing and sysctl setup for `forwarding: transparent`.
+# Routing and sysctl setup for transparent backend connections.
 #
 # Run once at boot, before mc-gateway starts. Everything here is host state, not
 # something the gateway can set for itself.

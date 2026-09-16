@@ -4,14 +4,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Client IP forwarding: PROXY protocol v1/v2 and Linux TPROXY"
+description = "Backend connections: Linux TPROXY, plain TCP, and inbound PROXY protocol"
 
 [dependencies]
-mc-config = { workspace = true }
+proxy-header = { workspace = true }
+socket2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-libc = "0.2"
-socket2 = { workspace = true }

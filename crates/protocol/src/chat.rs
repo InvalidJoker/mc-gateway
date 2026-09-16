@@ -82,30 +82,170 @@ pub fn strip_formatting(input: &str) -> String {
     out
 }
 
-/// Flattens a chat component back to plain text (legacy ping has no JSON).
+/// Flattens a chat component to plain text, dropping all formatting.
 pub fn component_to_plain(value: &Value) -> String {
-    match value {
-        Value::String(s) => s.clone(),
-        Value::Array(items) => items.iter().map(component_to_plain).collect(),
-        Value::Object(map) => {
-            let mut out = String::new();
-            if let Some(Value::String(text)) = map.get("text") {
-                out.push_str(text);
+    strip_formatting(&to_legacy(value))
+}
+
+/// Flattens a chat component into a legacy `§`-coded string.
+///
+/// This is how a backend's MOTD becomes editable: component trees can nest
+/// arbitrarily, but a MOTD is really just two lines of coloured text, and a
+/// legacy string is a shape that can be split on `\n` and put back together.
+/// Every client understands it, including 1.7.
+pub fn to_legacy(value: &Value) -> String {
+    let mut out = String::new();
+    let mut emitted: Option<Style> = None;
+    walk(value, Style::default(), &mut out, &mut emitted);
+    out
+}
+
+/// The formatting state a component carries, after inheritance.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Style {
+    /// Already-encoded colour code: `"a"`, or `"x\u{a7}0\u{a7}0…"` for hex.
+    color: Option<String>,
+    bold: bool,
+    italic: bool,
+    underlined: bool,
+    strikethrough: bool,
+    obfuscated: bool,
+}
+
+impl Style {
+    /// Applies a component's own fields on top of what it inherited.
+    fn inherit(&self, object: &serde_json::Map<String, Value>) -> Style {
+        let flag = |name: &str, current: bool| object.get(name).and_then(Value::as_bool).unwrap_or(current);
+        Style {
+            color: object
+                .get("color")
+                .and_then(Value::as_str)
+                .and_then(color_code)
+                .or_else(|| self.color.clone()),
+            bold: flag("bold", self.bold),
+            italic: flag("italic", self.italic),
+            underlined: flag("underlined", self.underlined),
+            strikethrough: flag("strikethrough", self.strikethrough),
+            obfuscated: flag("obfuscated", self.obfuscated),
+        }
+    }
+
+    fn write_codes(&self, out: &mut String) {
+        // `§r` first, because legacy codes are stateful: without a reset the
+        // previous segment's bold would bleed into this one.
+        out.push(SECTION);
+        out.push('r');
+        if let Some(color) = &self.color {
+            out.push(SECTION);
+            out.push_str(color);
+        }
+        for (enabled, code) in [
+            (self.bold, 'l'),
+            (self.italic, 'o'),
+            (self.underlined, 'n'),
+            (self.strikethrough, 'm'),
+            (self.obfuscated, 'k'),
+        ] {
+            if enabled {
+                out.push(SECTION);
+                out.push(code);
             }
-            if let Some(Value::Array(extra)) = map.get("extra") {
-                for item in extra {
-                    out.push_str(&component_to_plain(item));
+        }
+    }
+}
+
+fn walk(value: &Value, inherited: Style, out: &mut String, emitted: &mut Option<Style>) {
+    match value {
+        Value::String(text) => push_text(text, &inherited, out, emitted),
+        Value::Array(items) => {
+            // In an array the first element styles the rest.
+            let mut style = inherited;
+            for (index, item) in items.iter().enumerate() {
+                walk(item, style.clone(), out, emitted);
+                if index == 0
+                    && let Value::Object(object) = item
+                {
+                    style = style.inherit(object);
                 }
             }
-            out
         }
-        _ => String::new(),
+        Value::Object(object) => {
+            let style = inherited.inherit(object);
+            if let Some(text) = object.get("text").and_then(Value::as_str) {
+                push_text(text, &style, out, emitted);
+            }
+            // A translate component without a resolver is better skipped than
+            // rendered as its key; the `with` arguments are still real text.
+            if let Some(Value::Array(args)) = object.get("with") {
+                for arg in args {
+                    walk(arg, style.clone(), out, emitted);
+                }
+            }
+            if let Some(Value::Array(extra)) = object.get("extra") {
+                for item in extra {
+                    walk(item, style.clone(), out, emitted);
+                }
+            }
+        }
+        _ => {}
     }
+}
+
+fn push_text(text: &str, style: &Style, out: &mut String, emitted: &mut Option<Style>) {
+    if text.is_empty() {
+        return;
+    }
+    let unchanged = emitted.as_ref() == Some(style);
+    let default_start = emitted.is_none() && *style == Style::default();
+    if !unchanged && !default_start {
+        style.write_codes(out);
+    }
+    *emitted = Some(style.clone());
+    out.push_str(text);
+}
+
+/// Named colours and the 1.16+ hex form.
+fn color_code(name: &str) -> Option<String> {
+    if let Some(hex) = name.strip_prefix('#')
+        && hex.len() == 6
+        && hex.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        let mut code = String::from("x");
+        for digit in hex.chars() {
+            code.push(SECTION);
+            code.push(digit);
+        }
+        return Some(code);
+    }
+
+    Some(
+        match name {
+            "black" => "0",
+            "dark_blue" => "1",
+            "dark_green" => "2",
+            "dark_aqua" => "3",
+            "dark_red" => "4",
+            "dark_purple" => "5",
+            "gold" => "6",
+            "gray" | "grey" => "7",
+            "dark_gray" | "dark_grey" => "8",
+            "blue" => "9",
+            "green" => "a",
+            "aqua" => "b",
+            "red" => "c",
+            "light_purple" => "d",
+            "yellow" => "e",
+            "white" => "f",
+            _ => return None,
+        }
+        .to_owned(),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn translates_legacy_codes() {
@@ -140,5 +280,72 @@ mod tests {
         let value = serde_json::json!({"text": "A", "extra": [{"text": "B"}, "C"]});
         assert_eq!(component_to_plain(&value), "ABC");
         assert_eq!(strip_formatting("\u{a7}aGreen"), "Green");
+    }
+
+    #[test]
+    fn a_plain_component_needs_no_codes() {
+        assert_eq!(to_legacy(&json!({"text": "A Minecraft Server"})), "A Minecraft Server");
+        assert_eq!(to_legacy(&json!("bare string")), "bare string");
+    }
+
+    #[test]
+    fn named_colours_and_formats_become_legacy_codes() {
+        let value = json!({"text": "Hello", "color": "gold", "bold": true});
+        assert_eq!(to_legacy(&value), "\u{a7}r\u{a7}6\u{a7}lHello");
+    }
+
+    #[test]
+    fn hex_colours_use_the_1_16_form() {
+        let value = json!({"text": "blue", "color": "#00AAFF"});
+        assert_eq!(
+            to_legacy(&value),
+            "\u{a7}r\u{a7}x\u{a7}0\u{a7}0\u{a7}A\u{a7}A\u{a7}F\u{a7}Fblue"
+        );
+    }
+
+    #[test]
+    fn children_inherit_the_parent_style() {
+        let value = json!({
+            "text": "A",
+            "color": "red",
+            "extra": [{"text": "B"}, {"text": "C", "color": "green"}]
+        });
+        // B keeps red from its parent; C switches to green.
+        assert_eq!(to_legacy(&value), "\u{a7}r\u{a7}cAB\u{a7}r\u{a7}aC");
+    }
+
+    #[test]
+    fn a_reset_precedes_every_style_change() {
+        let value = json!({"extra": [
+            {"text": "bold", "bold": true},
+            {"text": "plain"}
+        ]});
+        // Without the reset, "plain" would still be bold on the client.
+        assert_eq!(to_legacy(&value), "\u{a7}r\u{a7}lbold\u{a7}rplain");
+    }
+
+    #[test]
+    fn newlines_survive_so_lines_stay_splittable() {
+        let value = json!({"text": "first\nsecond", "color": "gray"});
+        let legacy = to_legacy(&value);
+        assert_eq!(legacy.lines().count(), 2);
+        assert_eq!(strip_formatting(&legacy), "first\nsecond");
+    }
+
+    #[test]
+    fn a_real_backend_motd_roundtrips_to_plain_text() {
+        // The shape vanilla and Paper actually send.
+        let value = json!({
+            "extra": [
+                {"text": "A Minecraft Server", "color": "white"},
+                {"text": "\n"},
+                {"text": "powered by Paper", "color": "gray", "italic": true}
+            ],
+            "text": ""
+        });
+        assert_eq!(
+            component_to_plain(&value),
+            "A Minecraft Server\npowered by Paper"
+        );
     }
 }

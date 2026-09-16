@@ -69,6 +69,25 @@ impl FakeBackend {
                     log.lock().expect("backend log").push(Received { peer, head });
 
                     match behaviour {
+                        Behaviour::Status(json) => {
+                            let _ = stream
+                                .write_all(&mc_protocol::status::encode_status_response(&json))
+                                .await;
+                            let _ = stream.flush().await;
+                            // Echoing whatever comes next answers the latency
+                            // ping: pong has the same packet id and payload.
+                            let mut buf = vec![0u8; 4096];
+                            loop {
+                                match stream.read(&mut buf).await {
+                                    Ok(0) | Err(_) => return,
+                                    Ok(n) => {
+                                        if stream.write_all(&buf[..n]).await.is_err() {
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         Behaviour::Echo => {
                             let mut buf = vec![0u8; 8192];
                             loop {
@@ -81,13 +100,6 @@ impl FakeBackend {
                                     }
                                 }
                             }
-                        }
-                        Behaviour::Status(json) => {
-                            let _ = stream
-                                .write_all(&mc_protocol::status::encode_status_response(&json))
-                                .await;
-                            let _ = stream.flush().await;
-                            time::sleep(Duration::from_millis(200)).await;
                         }
                         Behaviour::Silent => {
                             std::future::pending::<()>().await;
@@ -139,6 +151,17 @@ impl FakeBackend {
         }
         panic!("expected {count} connections, saw {}", self.connection_count());
     }
+}
+
+/// A backend that answers status pings with a realistic Paper-shaped document.
+pub fn paper_status(motd: &str, online: u32) -> String {
+    format!(
+        r#"{{"version":{{"name":"Paper 1.21.1","protocol":767}},
+            "players":{{"max":100,"online":{online},"sample":[{{"name":"Notch","id":"x"}}]}},
+            "description":{{"text":"{motd}"}},
+            "favicon":"data:image/png;base64,AAAA",
+            "enforcesSecureChat":false}}"#
+    )
 }
 
 /// Starts a gateway from a YAML string. Listeners must bind to port 0.

@@ -3,7 +3,6 @@
 
 pub mod health;
 pub mod matcher;
-pub mod ping;
 pub mod registry;
 
 pub use matcher::{Matcher, RouteMatch};

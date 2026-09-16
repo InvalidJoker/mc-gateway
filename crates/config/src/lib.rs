@@ -2,17 +2,16 @@
 //!
 //! Validation is split in two: hard errors that stop start-up, and warnings for
 //! combinations that parse fine but are almost certainly not what was meant
-//! (a PROXY header aimed at a vanilla server, a group nothing routes to).
+//! (a group nothing routes to, a server no route can reach).
 
-pub mod cidr;
-pub mod duration;
 pub mod model;
+pub mod net;
 
 use std::{collections::BTreeSet, path::Path};
 
-pub use cidr::{IpNet, IpNets};
-pub use duration::HumanDuration;
+pub use ipnet::IpNet;
 pub use model::*;
+pub use net::IpNets;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -140,6 +139,11 @@ impl Config {
             } else if self.resolve_target(default).is_empty() {
                 errors.push(format!("routing.default `{default}` is a group with no members"));
             }
+        } else {
+            warnings.push(
+                "no routing.default: clients that send no hostname (pre-1.7 pings) are refused"
+                    .into(),
+            );
         }
 
         let mut seen_hosts = BTreeSet::new();
@@ -196,22 +200,6 @@ impl Config {
             if server.weight == 0 {
                 warnings.push(format!("server `{name}` has weight 0 and will never be selected"));
             }
-            if server.forwarding == Forwarding::ProxyProtocolV2
-                && !server.kind.supports_proxy_protocol()
-            {
-                warnings.push(format!(
-                    "server `{name}` is `{}` but uses proxy_protocol_v2; that software cannot \
-                     read the header and will drop the connection — use `transparent` (TPROXY) \
-                     or put a proxy in front of it",
-                    server.kind
-                ));
-            }
-            if server.forwarding == Forwarding::Transparent && !cfg!(target_os = "linux") {
-                warnings.push(format!(
-                    "server `{name}` uses transparent forwarding, which needs Linux TPROXY; \
-                     this build cannot start that listener"
-                ));
-            }
             if !routed.contains(name.as_str()) {
                 warnings.push(format!("server `{name}` is not reachable through any route"));
             }
@@ -227,7 +215,8 @@ impl Config {
     fn validate_operational(&self, warnings: &mut Vec<String>) {
         if self.health.enabled && self.health.timeout >= self.health.interval {
             warnings.push(format!(
-                "health.timeout ({}) is not shorter than health.interval ({}); checks will overlap",
+                "health.timeout ({:?}) is not shorter than health.interval ({:?}); \
+                 checks will overlap",
                 self.health.timeout, self.health.interval
             ));
         }
@@ -243,10 +232,10 @@ impl Config {
                 self.metrics.bind
             ));
         }
-        if !self.motd.enabled {
+        if self.timeouts.idle.is_zero() {
             warnings.push(
-                "motd.enabled is false: status pings are proxied, so the server list goes dark \
-                 whenever a backend does"
+                "timeouts.idle is 0: a client that vanishes without closing holds its backend \
+                 slot forever"
                     .into(),
             );
         }
@@ -261,10 +250,7 @@ pub fn validate_host_pattern(pattern: &str) -> Result<(), String> {
     if pattern == "*" {
         return Ok(());
     }
-    let body = match pattern.strip_prefix("*.") {
-        Some(rest) => rest,
-        None => pattern,
-    };
+    let body = pattern.strip_prefix("*.").unwrap_or(pattern);
     if body.is_empty() {
         return Err("wildcard needs a domain after `*.`".into());
     }
@@ -315,6 +301,7 @@ pub fn split_host_port(address: &str) -> Result<(&str, u16), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     const MINIMAL: &str = r#"
 listeners:
@@ -338,12 +325,39 @@ servers:
         assert_eq!(loaded.config.listeners.len(), 1);
         assert_eq!(loaded.config.resolve_target("survival"), ["survival-01"]);
         assert_eq!(loaded.config.resolve_target("survival-01"), ["survival-01"]);
-        assert!(loaded.config.motd.enabled, "MOTD is served by default");
+    }
+
+    #[test]
+    fn without_motd_lines_nothing_is_rewritten() {
+        // The default is full pass-through: the backend's own status response
+        // reaches the client untouched.
+        assert!(!load(MINIMAL).unwrap().config.motd.rewrites_anything());
+    }
+
+    #[test]
+    fn a_single_motd_line_turns_rewriting_on() {
+        let raw = format!("{MINIMAL}motd:\n  line2: \"&7my network\"\n");
+        let motd = load(&raw).unwrap().config.motd;
+        assert!(motd.rewrites_anything());
+        assert_eq!(motd.line2.as_deref(), Some("&7my network"));
+        assert_eq!(motd.line1, None, "the backend keeps its first line");
+    }
+
+    #[test]
+    fn durations_are_read_as_human_text() {
+        let raw = format!(
+            "{MINIMAL}timeouts:\n  handshake: 2s\n  idle: 5m\n  connect: 750ms\n"
+        );
+        let timeouts = load(&raw).unwrap().config.timeouts;
+        assert_eq!(timeouts.handshake, Duration::from_secs(2));
+        assert_eq!(timeouts.idle, Duration::from_secs(300));
+        assert_eq!(timeouts.connect, Duration::from_millis(750));
+        assert_eq!(timeouts.status, Duration::from_secs(10), "unset keeps the default");
     }
 
     #[test]
     fn rejects_unknown_keys() {
-        let err = load(&format!("{MINIMAL}\nmodt:\n  text: typo\n")).unwrap_err();
+        let err = load(&format!("{MINIMAL}\nmodt:\n  line2: typo\n")).unwrap_err();
         assert!(matches!(err, ConfigError::Parse { .. }), "got {err:?}");
     }
 
@@ -374,20 +388,6 @@ servers:
     }
 
     #[test]
-    fn warns_when_a_header_is_aimed_at_software_that_cannot_read_it() {
-        let raw = format!(
-            "{MINIMAL}    kind: vanilla\n    forwarding: proxy_protocol_v2\n"
-        );
-        let loaded = load(&raw).unwrap();
-        assert!(
-            loaded.warnings.iter().any(|w| w.contains("cannot \nread the header")
-                || w.contains("cannot read the header")),
-            "{:?}",
-            loaded.warnings
-        );
-    }
-
-    #[test]
     fn warns_about_unrouted_servers() {
         let raw = format!("{MINIMAL}  creative-01:\n    address: \"10.10.2.10:25565\"\n");
         let loaded = load(&raw).unwrap();
@@ -400,7 +400,6 @@ servers:
 
     #[test]
     fn rejects_a_group_with_no_members() {
-        // `creative` exists as a declared group but no server joined it.
         let raw = format!(
             "{}groups:\n  creative: {{}}\n",
             MINIMAL.replace("default: survival", "default: creative")
@@ -435,22 +434,22 @@ listeners:
   - name: public
     bind: "0.0.0.0:25565"
 motd:
-  text: "global"
-  max_players: 100
+  line1: "&bglobal"
+  line2: "&7global second"
 routing:
   rules:
     - host: "modded.example.net"
       target: modded-01
       motd:
-        text: "modded only"
+        line2: "&6modded only"
 servers:
   modded-01:
     address: "10.10.2.10:25565"
 "#;
         let config = load(raw).unwrap().config;
         let effective = config.motd.overlay(config.routing.rules[0].motd.as_ref());
-        assert_eq!(effective.text, "modded only");
-        assert_eq!(effective.max_players, 100, "unset fields fall back");
+        assert_eq!(effective.line2.as_deref(), Some("&6modded only"));
+        assert_eq!(effective.line1.as_deref(), Some("&bglobal"), "unset fields fall back");
     }
 
     #[test]
@@ -459,5 +458,6 @@ servers:
         let loaded = Config::parse(raw, "config.example.yaml")
             .expect("the example config must always load");
         assert!(loaded.config.servers.len() >= 3);
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
     }
 }

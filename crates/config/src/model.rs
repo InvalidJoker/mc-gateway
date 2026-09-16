@@ -4,11 +4,11 @@
 //! only needs a listener, a route and a server. Unknown keys are rejected so a
 //! typo fails at start-up instead of silently changing behaviour in production.
 
-use std::{collections::BTreeMap, fmt, net::SocketAddr, path::PathBuf};
+use std::{collections::BTreeMap, fmt, net::SocketAddr, time::Duration};
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use serde::{Deserialize, Serialize};
 
-use crate::{cidr::IpNets, duration::HumanDuration};
+use crate::net::IpNets;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -66,8 +66,8 @@ pub struct InboundProxyProtocol {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Routing {
-    /// Target used when no rule matches. Without it, unmatched hosts are
-    /// refused — which is the safer default for a public edge.
+    /// Target used when no rule matches, and for clients that never send a
+    /// hostname at all (pre-1.7 pings). Without it, those are refused.
     pub default: Option<String>,
     pub rules: Vec<Rule>,
 }
@@ -82,7 +82,7 @@ pub struct Rule {
     /// Restrict this rule to specific listeners.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listeners: Option<Vec<String>>,
-    /// Per-route MOTD overlay on top of the global one.
+    /// Per-route MOTD lines, overriding the global ones.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub motd: Option<MotdOverride>,
 }
@@ -97,12 +97,9 @@ pub struct Server {
     pub address: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
-    /// Metadata used for logs, metrics labels and config sanity checks. It
-    /// never selects a forwarding mode on its own.
+    /// Metadata for logs and metrics labels. It changes no behaviour.
     #[serde(default)]
     pub kind: BackendKind,
-    #[serde(default)]
-    pub forwarding: Forwarding,
     /// Relative share for round-robin selection.
     #[serde(default = "default_weight")]
     pub weight: u32,
@@ -150,62 +147,9 @@ impl BackendKind {
             BackendKind::Unknown => "unknown",
         }
     }
-
-    /// Whether this software can read a PROXY protocol header at all.
-    ///
-    /// Vanilla and the modloaders built on it cannot; only the Bukkit-family
-    /// servers and the Java proxies grew an option for it.
-    pub const fn supports_proxy_protocol(self) -> bool {
-        matches!(
-            self,
-            BackendKind::Paper
-                | BackendKind::Spigot
-                | BackendKind::Folia
-                | BackendKind::Velocity
-                | BackendKind::Bungeecord
-                | BackendKind::Unknown
-        )
-    }
 }
 
 impl fmt::Display for BackendKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// How the backend learns the real client IP.
-///
-/// Deliberately limited to methods that do not require terminating login at the
-/// gateway. Velocity's "modern" forwarding and BungeeCord's `\0`-suffixed
-/// handshake both carry an *authenticated identity*, which only a proxy that
-/// has itself authenticated the player may assert. This gateway never does,
-/// so it never claims to.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Forwarding {
-    /// Plain TCP. The backend sees the gateway's address.
-    #[default]
-    None,
-    /// HAProxy PROXY protocol v2 header before the first Minecraft byte.
-    /// Paper: `proxy-protocol: true`. Velocity: `haproxy-protocol = true`.
-    ProxyProtocolV2,
-    /// Linux TPROXY: the outbound socket is bound to the client's own address,
-    /// so the backend sees the real IP with no protocol support required.
-    Transparent,
-}
-
-impl Forwarding {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Forwarding::None => "none",
-            Forwarding::ProxyProtocolV2 => "proxy_protocol_v2",
-            Forwarding::Transparent => "transparent",
-        }
-    }
-}
-
-impl fmt::Display for Forwarding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
@@ -231,175 +175,74 @@ pub enum Policy {
 
 // --------------------------------------------------------------------- motd
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The gateway proxies status pings to the backend and passes the response
+/// through untouched — version, player counts, sample and favicon all come from
+/// the server that is actually running.
+///
+/// The only thing it changes is the MOTD text, and only the lines named here.
+/// Leaving both unset means the status response is forwarded byte for byte.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Motd {
-    /// When false, status pings are proxied to the backend instead of being
-    /// answered here.
-    pub enabled: bool,
-    pub text: String,
-    pub version_name: String,
-    pub protocol: ProtocolPolicy,
-    pub max_players: i64,
-    pub players: PlayerSource,
-    /// Used when `players: static`.
-    pub online: i64,
-    /// Extra lines shown when hovering the player count.
-    pub sample: Vec<String>,
-    /// PNG file, 64x64. Loaded once at start-up.
-    pub favicon: Option<PathBuf>,
-    pub enforces_secure_chat: Option<bool>,
-    /// Shown when the route has no healthy backend.
+    /// Replaces the first line of the backend's MOTD. Unset keeps it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line1: Option<String>,
+    /// Replaces the second line, which is where a network usually puts its
+    /// own branding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line2: Option<String>,
+    /// Shown when there is no reachable backend to ask.
     pub offline: OfflineMotd,
 }
 
-impl Default for Motd {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            text: "A Minecraft Network".into(),
-            version_name: "Network".into(),
-            protocol: ProtocolPolicy::Auto,
-            max_players: 1000,
-            players: PlayerSource::Sessions,
-            online: 0,
-            sample: Vec::new(),
-            favicon: None,
-            enforces_secure_chat: Some(false),
-            offline: OfflineMotd::default(),
-        }
+impl Motd {
+    /// Whether the status response has to be parsed at all.
+    pub fn rewrites_anything(&self) -> bool {
+        self.line1.is_some() || self.line2.is_some()
     }
 }
 
+/// The one case the gateway cannot pass through: there is no backend to ask.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct OfflineMotd {
     pub text: String,
-    /// Report 0 players and a protocol of -1, which renders as "offline" in the
-    /// client's server list.
+    pub version_name: String,
+    pub max_players: i64,
+    /// Report protocol -1, which renders the entry as incompatible — the
+    /// clearest way to say "the gateway is up, that server is not".
     pub mark_incompatible: bool,
 }
 
 impl Default for OfflineMotd {
     fn default() -> Self {
-        Self { text: "&cCurrently offline".into(), mark_incompatible: true }
+        Self {
+            text: "&cCurrently offline".into(),
+            version_name: "offline".into(),
+            max_players: 0,
+            mark_incompatible: true,
+        }
     }
 }
 
-/// Per-route overlay. Absent fields fall back to the global MOTD.
+/// Per-route overlay on top of the global MOTD.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MotdOverride {
-    pub enabled: Option<bool>,
-    pub text: Option<String>,
-    pub version_name: Option<String>,
-    pub protocol: Option<ProtocolPolicy>,
-    pub max_players: Option<i64>,
-    pub players: Option<PlayerSource>,
-    pub online: Option<i64>,
-    pub sample: Option<Vec<String>>,
-    pub favicon: Option<PathBuf>,
-    pub enforces_secure_chat: Option<bool>,
+    pub line1: Option<String>,
+    pub line2: Option<String>,
     pub offline: Option<OfflineMotd>,
 }
 
 impl Motd {
-    /// Applies a route overlay, returning the effective MOTD.
     pub fn overlay(&self, over: Option<&MotdOverride>) -> Motd {
         let Some(over) = over else { return self.clone() };
         Motd {
-            enabled: over.enabled.unwrap_or(self.enabled),
-            text: over.text.clone().unwrap_or_else(|| self.text.clone()),
-            version_name: over.version_name.clone().unwrap_or_else(|| self.version_name.clone()),
-            protocol: over.protocol.unwrap_or(self.protocol),
-            max_players: over.max_players.unwrap_or(self.max_players),
-            players: over.players.unwrap_or(self.players),
-            online: over.online.unwrap_or(self.online),
-            sample: over.sample.clone().unwrap_or_else(|| self.sample.clone()),
-            favicon: over.favicon.clone().or_else(|| self.favicon.clone()),
-            enforces_secure_chat: over.enforces_secure_chat.or(self.enforces_secure_chat),
+            line1: over.line1.clone().or_else(|| self.line1.clone()),
+            line2: over.line2.clone().or_else(|| self.line2.clone()),
             offline: over.offline.clone().unwrap_or_else(|| self.offline.clone()),
         }
     }
-}
-
-/// What to report as the server's protocol version.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProtocolPolicy {
-    /// Echo the client's own protocol number, so the server list never shows
-    /// the red "incompatible version" cross regardless of what the client runs.
-    Auto,
-    /// A fixed number, which makes mismatching clients show as incompatible.
-    Fixed(i32),
-}
-
-impl ProtocolPolicy {
-    pub fn resolve(self, client_protocol: i32) -> i32 {
-        match self {
-            ProtocolPolicy::Auto => client_protocol,
-            ProtocolPolicy::Fixed(value) => value,
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for ProtocolPolicy {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct Visitor;
-
-        impl de::Visitor<'_> for Visitor {
-            type Value = ProtocolPolicy;
-
-            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("`auto` or a protocol number")
-            }
-
-            fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
-                if value.eq_ignore_ascii_case("auto") {
-                    Ok(ProtocolPolicy::Auto)
-                } else {
-                    value
-                        .parse()
-                        .map(ProtocolPolicy::Fixed)
-                        .map_err(|_| E::custom(format!("expected `auto` or a number, got `{value}`")))
-                }
-            }
-
-            fn visit_i64<E: de::Error>(self, value: i64) -> Result<Self::Value, E> {
-                i32::try_from(value)
-                    .map(ProtocolPolicy::Fixed)
-                    .map_err(|_| E::custom("protocol number out of range"))
-            }
-
-            fn visit_u64<E: de::Error>(self, value: u64) -> Result<Self::Value, E> {
-                i32::try_from(value)
-                    .map(ProtocolPolicy::Fixed)
-                    .map_err(|_| E::custom("protocol number out of range"))
-            }
-        }
-
-        deserializer.deserialize_any(Visitor)
-    }
-}
-
-impl Serialize for ProtocolPolicy {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            ProtocolPolicy::Auto => serializer.serialize_str("auto"),
-            ProtocolPolicy::Fixed(value) => serializer.serialize_i32(*value),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PlayerSource {
-    /// Sessions currently proxied by this gateway.
-    #[default]
-    Sessions,
-    /// The fixed `online` value.
-    Static,
-    /// Sum of the player counts seen by status health checks.
-    Backends,
 }
 
 // ----------------------------------------------------------------- messages
@@ -457,18 +300,19 @@ impl Default for Limits {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RateLimit {
     /// Connections allowed to burst before the bucket empties; 0 disables.
     pub burst: u32,
     /// Time to refill the bucket completely.
-    pub per: HumanDuration,
+    #[serde(with = "humantime_serde")]
+    pub per: Duration,
 }
 
 impl Default for RateLimit {
     fn default() -> Self {
-        Self { burst: 30, per: HumanDuration::from_secs(60) }
+        Self { burst: 30, per: Duration::from_secs(60) }
     }
 }
 
@@ -484,25 +328,30 @@ impl RateLimit {
 #[serde(default, deny_unknown_fields)]
 pub struct Timeouts {
     /// Time allowed to deliver a complete handshake after connecting.
-    pub handshake: HumanDuration,
-    /// Time allowed for the whole status exchange.
-    pub status: HumanDuration,
+    #[serde(with = "humantime_serde")]
+    pub handshake: Duration,
+    /// Time allowed for the backend to answer a proxied status ping.
+    #[serde(with = "humantime_serde")]
+    pub status: Duration,
     /// TCP connect to the backend.
-    pub connect: HumanDuration,
+    #[serde(with = "humantime_serde")]
+    pub connect: Duration,
     /// Idle time on an established session before it is closed; 0 disables.
-    pub idle: HumanDuration,
+    #[serde(with = "humantime_serde")]
+    pub idle: Duration,
     /// Grace period for draining sessions on shutdown.
-    pub drain: HumanDuration,
+    #[serde(with = "humantime_serde")]
+    pub drain: Duration,
 }
 
 impl Default for Timeouts {
     fn default() -> Self {
         Self {
-            handshake: HumanDuration::from_secs(5),
-            status: HumanDuration::from_secs(10),
-            connect: HumanDuration::from_secs(3),
-            idle: HumanDuration::from_secs(600),
-            drain: HumanDuration::from_secs(30),
+            handshake: Duration::from_secs(5),
+            status: Duration::from_secs(10),
+            connect: Duration::from_secs(3),
+            idle: Duration::from_secs(600),
+            drain: Duration::from_secs(30),
         }
     }
 }
@@ -514,8 +363,10 @@ impl Default for Timeouts {
 pub struct Health {
     pub enabled: bool,
     pub method: HealthMethod,
-    pub interval: HumanDuration,
-    pub timeout: HumanDuration,
+    #[serde(with = "humantime_serde")]
+    pub interval: Duration,
+    #[serde(with = "humantime_serde")]
+    pub timeout: Duration,
     /// Consecutive successes before a down server is used again.
     pub rise: u32,
     /// Consecutive failures before a server is taken out.
@@ -530,8 +381,8 @@ impl Default for Health {
         Self {
             enabled: true,
             method: HealthMethod::Status,
-            interval: HumanDuration::from_secs(10),
-            timeout: HumanDuration::from_secs(2),
+            interval: Duration::from_secs(10),
+            timeout: Duration::from_secs(2),
             rise: 2,
             fall: 3,
             start_healthy: true,
@@ -544,8 +395,7 @@ impl Default for Health {
 pub enum HealthMethod {
     /// TCP connect only.
     Tcp,
-    /// Full status ping, which also yields player counts and the backend's
-    /// version string.
+    /// Full status ping, which also yields player counts and the version.
     #[default]
     Status,
 }
@@ -555,8 +405,10 @@ pub enum HealthMethod {
 pub struct HealthOverride {
     pub enabled: Option<bool>,
     pub method: Option<HealthMethod>,
-    pub interval: Option<HumanDuration>,
-    pub timeout: Option<HumanDuration>,
+    #[serde(default, with = "humantime_serde")]
+    pub interval: Option<Duration>,
+    #[serde(default, with = "humantime_serde")]
+    pub timeout: Option<Duration>,
     pub rise: Option<u32>,
     pub fall: Option<u32>,
 }

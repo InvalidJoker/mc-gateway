@@ -22,39 +22,26 @@ servers:
   vanilla:
     address: "vanilla:25565"
     kind: vanilla
-    forwarding: none          # vanilla cannot read a header; TPROXY or nothing
-
   paper:
     address: "paper:25565"
     kind: paper
-    # Requires `settings.proxy-protocol: true` in the container's spigot.yml.
-    forwarding: none
-
   velocity:
     address: "velocity:25577"
     kind: velocity
-    # Matches `haproxy-protocol = true` in velocity.toml.
-    forwarding: proxy_protocol_v2
-
   fabric:
     address: "fabric:25565"
     kind: fabric
-    forwarding: none
-
   neoforge:
     address: "neoforge:25565"
     kind: neoforge
-    forwarding: none
 
+# Each backend keeps its own MOTD, player count, version and icon. Only the
+# second line is replaced, which is how you tell at a glance that the ping went
+# through the gateway and not straight to the server.
 motd:
-  enabled: true
-  text: |
-    &b&lMC-GATEWAY &8» &7test network
-    &7vanilla &8• &7paper &8• &7velocity &8• &7modded
-  version_name: "mc-gateway"
-  protocol: auto
-  max_players: 100
-  players: sessions
+  line2: "&8• &7via mc-gateway"
+  offline:
+    text: "&cbackend offline"
 
 limits:
   max_connections_per_ip: 0   # everything comes from the docker bridge IP

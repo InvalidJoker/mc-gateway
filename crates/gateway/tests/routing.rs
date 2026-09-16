@@ -162,7 +162,7 @@ timeouts:
     let address = server.address("public").unwrap();
 
     let mut client = login(address, "typo.example.net", "Alice").await;
-    assert_eq!(read_kick(&mut client).await, "\u{a7}cUnknown server address");
+    assert_eq!(read_kick(&mut client).await, "Unknown server address");
     assert_eq!(backend.connection_count(), 0, "nothing reached a backend");
 
     server.shutdown().await;
@@ -199,7 +199,7 @@ health:
     let address = server.address("public").unwrap();
 
     let mut client = login(address, "anything.example.net", "Alice").await;
-    assert_eq!(read_kick(&mut client).await, "\u{a7}cCould not reach the server");
+    assert_eq!(read_kick(&mut client).await, "Could not reach the server");
 
     server.shutdown().await;
 }
@@ -245,7 +245,7 @@ health:
     let mut client = login(address, "anything.example.net", "Alice").await;
     assert_eq!(
         read_kick(&mut client).await,
-        "\u{a7}cThis server is currently offline",
+        "This server is currently offline",
         "health checks short-circuit the connect attempt"
     );
 

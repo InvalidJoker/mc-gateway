@@ -1,8 +1,23 @@
-"""End-to-end smoke test against the real mc-gateway binary."""
+"""End-to-end smoke test against the real mc-gateway binary.
+
+Starts a fake Minecraft backend, runs the gateway in front of it, and checks
+what a client and the backend actually see on the wire.
+
+    python3 test-infra/smoke.py ./target/release/mc-gateway --config test-infra/smoke.yaml
+"""
 import json, socket, struct, subprocess, threading, time, sys, urllib.request
 
 GW = ("127.0.0.1", 25599)
 BACKEND_PORT = 25601
+
+BACKEND_STATUS = {
+    "version": {"name": "Paper 1.21.1", "protocol": 767},
+    "players": {"max": 100, "online": 7, "sample": [{"name": "Notch", "id": "x"}]},
+    "description": {"text": "A Minecraft Server"},
+    "favicon": "data:image/png;base64,AAAA",
+    "enforcesSecureChat": False,
+}
+
 
 def varint(v):
     out = b""
@@ -15,6 +30,7 @@ def varint(v):
         else:
             return out + bytes([b])
 
+
 def read_varint(sock):
     n = 0
     for i in range(5):
@@ -26,18 +42,23 @@ def read_varint(sock):
             return n
     raise ValueError("varint too long")
 
+
 def packet(pid, body):
     payload = varint(pid) + body
     return varint(len(payload)) + payload
+
 
 def mcstring(s):
     b = s.encode()
     return varint(len(b)) + b
 
+
 def handshake(host, state, protocol=767):
     return packet(0x00, varint(protocol) + mcstring(host) + struct.pack(">H", 25565) + varint(state))
 
+
 received = []
+
 
 def backend():
     srv = socket.socket()
@@ -46,20 +67,29 @@ def backend():
     srv.listen(8)
     while True:
         conn, _ = srv.accept()
-        data = conn.recv(4096)
-        if data:
-            received.append(data)
-        threading.Thread(target=lambda c=conn: echo(c), daemon=True).start()
+        threading.Thread(target=serve_backend, args=(conn,), daemon=True).start()
 
-def echo(conn):
+
+def serve_backend(conn):
+    """Records the first bytes, answers status pings, echoes everything else."""
     try:
+        head = conn.recv(4096)
+        if not head:
+            return
+        received.append(head)
+
+        # next_state == 1 means the client wants a status response.
+        if head[-1:] == b"\x01" or b"\x01\x01\x00" in head:
+            body = json.dumps(BACKEND_STATUS).encode()
+            conn.sendall(packet(0x00, varint(len(body)) + body))
         while True:
             data = conn.recv(4096)
             if not data:
                 return
-            conn.sendall(data)
+            conn.sendall(data)  # echoing a ping packet is a valid pong
     except OSError:
         pass
+
 
 threading.Thread(target=backend, daemon=True).start()
 time.sleep(0.3)
@@ -68,39 +98,45 @@ gateway = subprocess.Popen(sys.argv[1:], stdout=subprocess.PIPE, stderr=subproce
 time.sleep(1.5)
 
 failures = []
+
+
 def check(name, ok, detail=""):
     print(("  PASS  " if ok else "  FAIL  ") + name + (f"  [{detail}]" if detail else ""))
     if not ok:
         failures.append(name)
 
-try:
-    # --- status ping -------------------------------------------------------
+
+def status_ping(host):
     s = socket.create_connection(GW, timeout=5)
-    s.sendall(handshake("survival.example.net", 1) + packet(0x00, b""))
-    read_varint(s); read_varint(s)
+    s.sendall(handshake(host, 1) + packet(0x00, b""))
+    read_varint(s)
+    read_varint(s)
     length = read_varint(s)
     buf = b""
     while len(buf) < length:
         buf += s.recv(length - len(buf))
-    status = json.loads(buf.decode())
     s.close()
+    return json.loads(buf.decode())
+
+
+try:
+    # --- status ping: passed through, second line replaced -----------------
+    status = status_ping("survival.example.net")
+    lines = status["description"]["text"].split("\n")
 
     print("\nMOTD as a client sees it:")
-    print("  " + status["description"]["text"].replace("\n", "\n  "))
-    check("status answered by the gateway", status["version"]["name"] == "MyNetwork")
-    check("protocol echoed back", status["version"]["protocol"] == 767)
-    check("max players", status["players"]["max"] == 1000)
-    check("sample line present", status["players"]["sample"][0]["name"].endswith("Welcome!"))
+    for line in lines:
+        print("  " + line)
 
-    # --- old client --------------------------------------------------------
-    s = socket.create_connection(GW, timeout=5)
-    s.sendall(bytes([0xFE, 0x01]))
-    legacy = s.recv(1024)
-    s.close()
-    fields = legacy[3:].decode("utf-16-be").split("\x00")
-    check("1.6 legacy ping answered", legacy[0] == 0xFF and fields[2] == "MyNetwork", fields[3][:30])
+    check("backend's first line kept", lines[0] == "A Minecraft Server", lines[0])
+    check("second line replaced by the gateway", len(lines) > 1 and "MY NETWORK" in lines[1],
+          lines[1] if len(lines) > 1 else "<missing>")
+    check("backend version passed through", status["version"]["name"] == "Paper 1.21.1")
+    check("backend player count passed through", status["players"]["online"] == 7)
+    check("backend sample passed through", status["players"]["sample"][0]["name"] == "Notch")
+    check("backend favicon passed through", status["favicon"] == "data:image/png;base64,AAAA")
 
-    # --- login with PROXY protocol ----------------------------------------
+    # --- login --------------------------------------------------------------
     before = len(received)
     s = socket.create_connection(GW, timeout=5)
     s.sendall(handshake("survival.example.net", 2) + packet(0x00, mcstring("Notch") + b"\0" * 16))
@@ -108,39 +144,45 @@ try:
     while len(received) <= before and time.time() < deadline:
         time.sleep(0.05)
     head = received[-1] if len(received) > before else b""
+
     check("session reached the backend", bool(head))
-    check("PROXY v2 signature present", head.startswith(b"\r\n\r\n\x00\r\nQUIT\n"), head[:12].hex())
-    check("PROXY command is PROXY/TCP4", head[12] == 0x21 and head[13] == 0x11)
-    src = ".".join(str(b) for b in head[16:20])
-    check("real client IP forwarded", src == "127.0.0.1", src)
-    check("handshake follows the header", head[28:29] == varint(len(varint(0) + varint(767) + mcstring("survival.example.net") + struct.pack(">H", 25565) + varint(2))))
+    check("no PROXY header, no framing of our own",
+          head[:12] != b"\r\n\r\n\x00\r\nQUIT\n" and not head.startswith(b"PROXY "),
+          head[:12].hex())
+    check("handshake arrives verbatim", b"survival.example.net" in head)
 
     s.sendall(b"post-login")
     check("pipe carries traffic", s.recv(64) == b"post-login")
     s.close()
 
-    # --- unknown host ------------------------------------------------------
+    # --- a route with no backend -------------------------------------------
     s = socket.create_connection(GW, timeout=5)
     s.sendall(handshake("modded.example.net", 2) + packet(0x00, mcstring("Bob") + b"\0" * 16))
-    read_varint(s); pid = read_varint(s)
+    read_varint(s)
+    pid = read_varint(s)
     length = read_varint(s)
     reason = json.loads(s.recv(length).decode())
     s.close()
-    check("offline backend produces a kick", pid == 0x00 and "offline" in reason["text"], reason["text"])
+    check("offline backend produces a kick", pid == 0x00 and "offline" in reason["text"],
+          reason["text"])
 
-    # --- metrics -----------------------------------------------------------
+    offline = status_ping("modded.example.net")
+    check("offline route gets the offline MOTD", "offline" in offline["description"]["text"].lower(),
+          offline["description"]["text"])
+
+    # --- metrics ------------------------------------------------------------
     metrics = urllib.request.urlopen("http://127.0.0.1:9199/metrics", timeout=5).read().decode()
     check("metrics exported", "mc_gateway_connections_total" in metrics)
-    check("backend health gauge", 'mc_gateway_backend_up{backend="survival"' in metrics)
+    check("MOTD rewrites counted", "mc_gateway_motd_rewrites_total" in metrics)
     print("\nSelected metrics:")
     for line in metrics.splitlines():
         if line.startswith(("mc_gateway_connections_total", "mc_gateway_login_attempts_total",
                             "mc_gateway_status_requests_total", "mc_gateway_backend_up",
-                            "mc_gateway_backends_healthy", "mc_gateway_bytes_total")):
+                            "mc_gateway_motd_rewrites_total", "mc_gateway_backends_healthy")):
             print("  " + line)
 finally:
     gateway.terminate()
-    out, _ = gateway.communicate(timeout=10)
+    out, _ = gateway.communicate(timeout=30)
 
 print("\nGateway log:")
 for line in out.splitlines():

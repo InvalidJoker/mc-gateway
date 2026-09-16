@@ -2,6 +2,10 @@
 #
 # The gateway is the only thing exposed to the internet. Backends listen on a
 # private network and accept connections from the gateway only.
+#
+# It is a pass-through proxy: status pings are forwarded to the backend and its
+# answer is returned as-is, except for the MOTD lines named below. Everything
+# after the handshake is copied byte for byte.
 
 listeners:
   - name: public
@@ -20,7 +24,8 @@ listeners:
 # Forge/NeoForge markers and SRV trailing dots are stripped before matching.
 # ---------------------------------------------------------------------------
 routing:
-  # Used when nothing matches. Remove it to refuse unknown hostnames outright.
+  # Used when nothing matches, and for pre-1.7 clients, which send no hostname
+  # at all. Remove it to refuse unknown hostnames outright.
   default: survival
 
   rules:
@@ -32,10 +37,8 @@ routing:
 
     - host: "modded.example.net"
       target: modded-01
-      motd:                       # per-route MOTD overlay
-        text: |
-          &6Modded &8» &fNeoForge 1.21
-          &7Modpack v4 required
+      motd:                       # per-route MOTD lines
+        line2: "&6Modpack v4 required"
 
     - host: "*.play.example.net"  # any subdomain, and the bare domain too
       target: survival
@@ -44,70 +47,61 @@ routing:
       target: proxy-01
 
 # ---------------------------------------------------------------------------
-# Servers. Add 300 of them here, or push them in over the control API later.
+# Servers. Add 300 of them here.
+#
+# There is no forwarding setting: on Linux every backend connection is made
+# transparently (TPROXY), so the backend's accept() reports the player's real
+# address with no support needed on its side. On other platforms the gateway
+# connects normally and the backend sees the gateway. See docs/forwarding.md.
 # ---------------------------------------------------------------------------
 servers:
   survival-01:
     address: "10.10.1.10:25565"
     group: survival
-    kind: paper
-    forwarding: proxy_protocol_v2   # Paper: proxy-protocol: true in spigot.yml
+    kind: paper                   # metadata only: logs and metrics labels
     weight: 1
 
   survival-02:
     address: "10.10.1.11:25565"
     group: survival
     kind: paper
-    forwarding: proxy_protocol_v2
     weight: 1
     max_connections: 200
 
   creative-01:
     address: "10.10.1.20:25565"
     kind: paper
-    forwarding: proxy_protocol_v2
 
-  # Vanilla and the modloaders cannot read a PROXY header. On Linux, TPROXY
-  # gives them the real client IP with no server-side support at all.
-  # Everywhere else, leave forwarding at `none`.
   modded-01:
     address: "10.10.2.10:25565"
     kind: neoforge
-    forwarding: none
 
-  # A Velocity proxy behind the gateway: it reads the header natively
-  # (haproxy-protocol = true) and does player authentication itself.
   proxy-01:
     address: "10.10.3.10:25565"
     kind: velocity
-    forwarding: proxy_protocol_v2
 
 groups:
   survival:
     policy: least_connections     # round_robin | least_connections | failover
 
 # ---------------------------------------------------------------------------
-# The gateway answers status pings itself, so the server list stays up even
-# when every backend is down or restarting.
+# MOTD.
+#
+# The backend's own status response is passed through: version, player counts,
+# player sample and favicon all come from the server that is actually running.
+# The only thing changed is the MOTD text, and only the lines set here.
+#
+# Leave both unset and the status response is forwarded untouched.
 # ---------------------------------------------------------------------------
 motd:
-  enabled: true
-  text: |
-    &b&lMY NETWORK &8» &71.8 &8- &71.21
-    &7survival &8• &7creative &8• &7modded
-  version_name: "MyNetwork"
-  # `auto` echoes the client's own protocol number so the client never draws
-  # the red "incompatible version" cross. A fixed number does the opposite.
-  protocol: auto
-  max_players: 1000
-  players: sessions               # sessions | static | backends
-  sample:
-    - "&bWelcome to My Network"
-    - "&7play.example.net"
-  # favicon: "./favicon.png"      # 64x64 PNG
-  enforces_secure_chat: false
+  # line1: "&b&lMY NETWORK"       # uncomment to take over the first line too
+  line2: "&7survival &8• &7creative &8• &7modded"
+
+  # The one case there is nothing to pass through.
   offline:
     text: "&cCurrently offline &8• &7back soon"
+    version_name: "offline"
+    max_players: 0
     mark_incompatible: true
 
 messages:
@@ -130,7 +124,7 @@ timeouts:
   handshake: 5s
   status: 10s
   connect: 3s
-  idle: 600s
+  idle: 10m
   drain: 30s
 
 health:

@@ -1,242 +1,198 @@
-//! Building the status response the gateway answers with.
+//! MOTD rewriting.
 //!
-//! Answering here instead of proxying to a backend is what makes the server
-//! list independent of the backends: restarts, crashes and maintenance windows
-//! all look like a normal MOTD to the outside world.
+//! The gateway does not build a status response. It asks the backend and hands
+//! the answer back — version, player counts, sample and favicon included. The
+//! only thing it changes is the MOTD text, and only the lines the operator
+//! named.
+//!
+//! Doing it this way means a backend's real player count, its version string
+//! and its icon all keep working with no configuration, and a new field in some
+//! future protocol version passes through without the gateway knowing about it.
 
-use base64::{Engine, engine::general_purpose::STANDARD};
-use mc_config::{Motd, PlayerSource};
-use mc_protocol::{
-    chat,
-    status::{PlayerInfo, PlayerSample, ServerStatus, VersionInfo},
-};
-
-/// Everything that varies per ping.
-#[derive(Debug, Clone, Copy)]
-pub struct MotdContext<'a> {
-    /// Protocol number the client announced in its handshake.
-    pub client_protocol: i32,
-    /// Sessions currently proxied, for `players: sessions`.
-    pub sessions: i64,
-    /// Players the backends report, for `players: backends`.
-    pub reported: i64,
-    /// Pre-encoded `data:image/png;base64,...`.
-    pub favicon: Option<&'a str>,
-    /// No healthy backend for this route.
-    pub offline: bool,
-}
+use mc_config::Motd;
+use mc_protocol::chat;
+use serde_json::{Value, json};
 
 /// Protocol number that makes a client render the entry as incompatible, which
-/// is the clearest way to say "this is up, that server is not".
+/// is the clearest way to say "the gateway is up, that server is not".
 const INCOMPATIBLE: i32 = -1;
 
-pub fn build(motd: &Motd, ctx: MotdContext<'_>) -> ServerStatus {
-    let offline = ctx.offline;
-    let text = if offline { &motd.offline.text } else { &motd.text };
-
-    let protocol = if offline && motd.offline.mark_incompatible {
-        INCOMPATIBLE
-    } else {
-        motd.protocol.resolve(ctx.client_protocol)
-    };
-
-    let online = if offline {
-        0
-    } else {
-        match motd.players {
-            PlayerSource::Sessions => ctx.sessions,
-            PlayerSource::Static => motd.online,
-            PlayerSource::Backends => ctx.reported,
-        }
-    };
-
-    ServerStatus {
-        version: VersionInfo { name: motd.version_name.clone(), protocol },
-        players: PlayerInfo {
-            max: motd.max_players,
-            online,
-            sample: motd
-                .sample
-                .iter()
-                .map(|line| PlayerSample::line(chat::translate_colors(line)))
-                .collect(),
-        },
-        description: chat::component(text),
-        favicon: ctx.favicon.map(str::to_owned),
-        enforces_secure_chat: motd.enforces_secure_chat,
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum FaviconError {
-    #[error("cannot read favicon {path}: {source}")]
-    Io {
-        path: String,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("favicon {path} is not a PNG file")]
-    NotPng { path: String },
-    #[error("favicon {path} is {width}x{height}; Minecraft requires exactly 64x64")]
-    WrongSize { path: String, width: u32, height: u32 },
-}
-
-/// Loads a favicon into the `data:` URL the protocol expects.
+/// Replaces the configured lines in a status response document.
 ///
-/// The size is checked here because a wrong one is not a visible error: clients
-/// simply drop the whole status response, and the server looks offline.
-pub async fn load_favicon(path: &std::path::Path) -> Result<String, FaviconError> {
-    let display = path.display().to_string();
-    let bytes = tokio::fs::read(path)
-        .await
-        .map_err(|source| FaviconError::Io { path: display.clone(), source })?;
-
-    let (width, height) = png_dimensions(&bytes)
-        .ok_or_else(|| FaviconError::NotPng { path: display.clone() })?;
-    if (width, height) != (64, 64) {
-        return Err(FaviconError::WrongSize { path: display, width, height });
-    }
-
-    Ok(format!("data:image/png;base64,{}", STANDARD.encode(&bytes)))
+/// Returns `None` when the document is not JSON or carries no description, in
+/// which case the caller forwards the original bytes unchanged — a response the
+/// gateway cannot understand is still a response the client might.
+pub fn rewrite_status(json: &str, motd: &Motd) -> Option<String> {
+    let mut document: Value = serde_json::from_str(json).ok()?;
+    let description = document.get("description")?;
+    let rewritten = rewrite_description(description, motd);
+    document["description"] = rewritten;
+    serde_json::to_string(&document).ok()
 }
 
-/// Reads width and height straight out of the PNG signature and IHDR chunk.
-fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
-    const SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
-    if bytes.len() < 24 || bytes[..8] != SIGNATURE || &bytes[12..16] != b"IHDR" {
-        return None;
+/// Replaces line 1 and/or line 2 of a chat component.
+///
+/// The component tree is flattened to a legacy `§`-coded string first. A MOTD
+/// is two lines of coloured text; a component tree is an arbitrary nesting of
+/// spans, and there is no meaningful way to say "the second line" inside one
+/// without flattening it first.
+pub fn rewrite_description(description: &Value, motd: &Motd) -> Value {
+    let flattened = chat::to_legacy(description);
+    let mut lines: Vec<String> = flattened.split('\n').map(str::to_owned).collect();
+
+    for (index, replacement) in [(0, &motd.line1), (1, &motd.line2)] {
+        let Some(text) = replacement else { continue };
+        let text = chat::translate_colors(text);
+        // A backend with a one-line MOTD still gets a second line if one is
+        // configured.
+        while lines.len() <= index {
+            lines.push(String::new());
+        }
+        lines[index] = text;
     }
-    let width = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
-    let height = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
-    Some((width, height))
+
+    json!({ "text": lines.join("\n") })
+}
+
+/// The one response the gateway has to invent: there is no backend to ask.
+pub fn offline_status(motd: &Motd, client_protocol: i32) -> String {
+    let offline = &motd.offline;
+    let protocol = if offline.mark_incompatible { INCOMPATIBLE } else { client_protocol };
+
+    json!({
+        "version": { "name": offline.version_name, "protocol": protocol },
+        "players": { "max": offline.max_players, "online": 0 },
+        "description": { "text": chat::translate_colors(&offline.text) },
+    })
+    .to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mc_config::OfflineMotd;
 
-    fn context() -> MotdContext<'static> {
-        MotdContext {
-            client_protocol: 767,
-            sessions: 42,
-            reported: 100,
-            favicon: None,
-            offline: false,
+    /// What Paper actually sends.
+    const BACKEND: &str = r#"{
+        "version": {"name": "Paper 1.21.1", "protocol": 767},
+        "players": {"max": 100, "online": 7, "sample": [{"name": "Notch", "id": "x"}]},
+        "description": {"extra": [
+            {"text": "A Minecraft Server", "color": "white"},
+            {"text": "\n"},
+            {"text": "powered by Paper", "color": "gray"}
+        ], "text": ""},
+        "favicon": "data:image/png;base64,AAAA",
+        "enforcesSecureChat": false
+    }"#;
+
+    fn motd(line1: Option<&str>, line2: Option<&str>) -> Motd {
+        Motd {
+            line1: line1.map(str::to_owned),
+            line2: line2.map(str::to_owned),
+            offline: OfflineMotd::default(),
         }
     }
 
-    #[test]
-    fn auto_protocol_mirrors_the_client() {
-        let motd = Motd::default();
-        assert_eq!(build(&motd, context()).version.protocol, 767);
-
-        let old_client = MotdContext { client_protocol: 47, ..context() };
-        assert_eq!(build(&motd, old_client).version.protocol, 47, "1.8 sees itself as supported");
+    fn description_text(json: &str) -> String {
+        let value: Value = serde_json::from_str(json).unwrap();
+        value["description"]["text"].as_str().unwrap().to_owned()
     }
 
     #[test]
-    fn a_fixed_protocol_is_reported_verbatim() {
-        let motd = Motd { protocol: mc_config::ProtocolPolicy::Fixed(767), ..Motd::default() };
-        let old_client = MotdContext { client_protocol: 47, ..context() };
-        assert_eq!(build(&motd, old_client).version.protocol, 767);
+    fn replacing_the_second_line_keeps_the_first() {
+        let out = rewrite_status(BACKEND, &motd(None, Some("&7my network"))).unwrap();
+        let text = description_text(&out);
+        let lines: Vec<&str> = text.split('\n').collect();
+
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("A Minecraft Server"), "{:?}", lines[0]);
+        assert_eq!(lines[1], "\u{a7}7my network");
     }
 
     #[test]
-    fn player_counts_follow_the_configured_source() {
-        let mut motd = Motd { online: 7, ..Motd::default() };
+    fn everything_but_the_description_passes_through() {
+        let out = rewrite_status(BACKEND, &motd(None, Some("&7my network"))).unwrap();
+        let value: Value = serde_json::from_str(&out).unwrap();
 
-        motd.players = PlayerSource::Sessions;
-        assert_eq!(build(&motd, context()).players.online, 42);
-
-        motd.players = PlayerSource::Static;
-        assert_eq!(build(&motd, context()).players.online, 7);
-
-        motd.players = PlayerSource::Backends;
-        assert_eq!(build(&motd, context()).players.online, 100);
+        // The backend's own numbers, icon and version survive untouched — the
+        // whole point of rewriting instead of synthesising.
+        assert_eq!(value["version"]["name"], "Paper 1.21.1");
+        assert_eq!(value["version"]["protocol"], 767);
+        assert_eq!(value["players"]["online"], 7);
+        assert_eq!(value["players"]["max"], 100);
+        assert_eq!(value["players"]["sample"][0]["name"], "Notch");
+        assert_eq!(value["favicon"], "data:image/png;base64,AAAA");
+        assert_eq!(value["enforcesSecureChat"], false);
     }
 
     #[test]
-    fn the_offline_motd_replaces_text_and_counts() {
-        let motd = Motd { text: "online".into(), ..Motd::default() };
-        let status = build(&motd, MotdContext { offline: true, ..context() });
-
-        assert_eq!(status.players.online, 0);
-        assert_eq!(status.version.protocol, INCOMPATIBLE);
-        let text = status.description["text"].as_str().unwrap();
-        assert!(text.contains("Currently offline"), "{text}");
+    fn both_lines_can_be_taken_over() {
+        let out = rewrite_status(BACKEND, &motd(Some("&b&lMY NETWORK"), Some("&7second"))).unwrap();
+        assert_eq!(
+            description_text(&out),
+            "\u{a7}b\u{a7}lMY NETWORK\n\u{a7}7second"
+        );
     }
 
     #[test]
-    fn offline_can_keep_the_entry_looking_compatible() {
+    fn the_original_colours_are_preserved_when_a_line_is_kept() {
+        let backend = r#"{"description":{"text":"first","color":"gold"}}"#;
+        let out = rewrite_status(backend, &motd(None, Some("&7second"))).unwrap();
+        let text = description_text(&out);
+        assert!(text.starts_with("\u{a7}r\u{a7}6first"), "{text:?}");
+    }
+
+    #[test]
+    fn a_one_line_backend_motd_gains_a_second_line() {
+        let backend = r#"{"description":{"text":"only one line"}}"#;
+        let out = rewrite_status(backend, &motd(None, Some("&7added"))).unwrap();
+        assert_eq!(description_text(&out), "only one line\n\u{a7}7added");
+    }
+
+    #[test]
+    fn a_plain_string_description_is_handled() {
+        let backend = r#"{"description":"legacy string\nsecond"}"#;
+        let out = rewrite_status(backend, &motd(None, Some("&7replaced"))).unwrap();
+        assert_eq!(description_text(&out), "legacy string\n\u{a7}7replaced");
+    }
+
+    #[test]
+    fn nothing_configured_still_produces_a_faithful_document() {
+        let out = rewrite_status(BACKEND, &motd(None, None)).unwrap();
+        let text = description_text(&out);
+        assert!(text.contains("A Minecraft Server"));
+        assert!(text.contains("powered by Paper"));
+    }
+
+    #[test]
+    fn a_response_that_is_not_json_is_left_to_the_client() {
+        assert_eq!(rewrite_status("not json at all", &motd(None, Some("x"))), None);
+        assert_eq!(rewrite_status(r#"{"players":{}}"#, &motd(None, Some("x"))), None);
+    }
+
+    #[test]
+    fn the_offline_response_is_a_complete_status_document() {
         let motd = Motd {
-            offline: mc_config::OfflineMotd {
-                text: "maintenance".into(),
-                mark_incompatible: false,
+            offline: OfflineMotd {
+                text: "&cMaintenance".into(),
+                version_name: "offline".into(),
+                max_players: 0,
+                mark_incompatible: true,
             },
-            ..Motd::default()
+            ..motd(None, None)
         };
-        let status = build(&motd, MotdContext { offline: true, ..context() });
-        assert_eq!(status.version.protocol, 767);
+        let value: Value = serde_json::from_str(&offline_status(&motd, 767)).unwrap();
+
+        assert_eq!(value["description"]["text"], "\u{a7}cMaintenance");
+        assert_eq!(value["version"]["protocol"], INCOMPATIBLE);
+        assert_eq!(value["players"]["online"], 0);
     }
 
     #[test]
-    fn colour_codes_are_translated_in_text_and_sample() {
-        let motd = Motd {
-            text: "&bNetwork".into(),
-            sample: vec!["&7line one".into()],
-            ..Motd::default()
-        };
-        let status = build(&motd, context());
-        assert_eq!(status.description["text"], "\u{a7}bNetwork");
-        assert_eq!(status.players.sample[0].name, "\u{a7}7line one");
-    }
-
-    #[test]
-    fn the_json_survives_a_roundtrip() {
-        let motd = Motd::default();
-        let json: serde_json::Value =
-            serde_json::from_str(&build(&motd, context()).to_json()).unwrap();
-        assert_eq!(json["players"]["max"], 1000);
-        assert!(json["description"]["text"].is_string());
-    }
-
-    #[tokio::test]
-    async fn favicons_are_validated_before_they_break_the_ping() {
-        let dir = std::env::temp_dir().join("mc-gateway-favicon-tests");
-        tokio::fs::create_dir_all(&dir).await.unwrap();
-
-        let not_png = dir.join("not.png");
-        tokio::fs::write(&not_png, b"definitely not a png").await.unwrap();
-        assert!(matches!(
-            load_favicon(&not_png).await.unwrap_err(),
-            FaviconError::NotPng { .. }
-        ));
-
-        // A syntactically valid PNG header declaring 32x32.
-        let mut small = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
-        small.extend_from_slice(&13u32.to_be_bytes());
-        small.extend_from_slice(b"IHDR");
-        small.extend_from_slice(&32u32.to_be_bytes());
-        small.extend_from_slice(&32u32.to_be_bytes());
-        let wrong_size = dir.join("small.png");
-        tokio::fs::write(&wrong_size, &small).await.unwrap();
-        assert!(matches!(
-            load_favicon(&wrong_size).await.unwrap_err(),
-            FaviconError::WrongSize { width: 32, height: 32, .. }
-        ));
-
-        let mut correct = small.clone();
-        correct[16..20].copy_from_slice(&64u32.to_be_bytes());
-        correct[20..24].copy_from_slice(&64u32.to_be_bytes());
-        let good = dir.join("good.png");
-        tokio::fs::write(&good, &correct).await.unwrap();
-        let encoded = load_favicon(&good).await.unwrap();
-        assert!(encoded.starts_with("data:image/png;base64,"), "{encoded}");
-
-        assert!(matches!(
-            load_favicon(&dir.join("missing.png")).await.unwrap_err(),
-            FaviconError::Io { .. }
-        ));
-        tokio::fs::remove_dir_all(&dir).await.unwrap();
+    fn an_offline_entry_can_stay_looking_compatible() {
+        let mut motd = motd(None, None);
+        motd.offline.mark_incompatible = false;
+        let value: Value = serde_json::from_str(&offline_status(&motd, 767)).unwrap();
+        assert_eq!(value["version"]["protocol"], 767);
     }
 }

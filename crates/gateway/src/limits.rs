@@ -2,19 +2,27 @@
 //!
 //! Everything here runs before a single Minecraft byte is read, because that is
 //! the only place where the cost of an abusive connection is still near zero.
+//!
+//! The token buckets are [`governor`]'s: a keyed rate limiter already handles
+//! the per-IP state, the refill arithmetic and the garbage collection that an
+//! unbounded map of every IP that ever connected would otherwise need.
 
 use std::{
-    collections::HashMap,
     net::IpAddr,
+    num::NonZeroU32,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Instant,
+    time::Duration,
 };
 
 use arc_swap::ArcSwap;
-use mc_config::{Limits, cidr};
+use dashmap::DashMap;
+use governor::{Quota, RateLimiter, clock::DefaultClock, state::keyed::DefaultKeyedStateStore};
+use mc_config::{Limits, net::unmap};
+
+type IpRateLimiter = RateLimiter<IpAddr, DefaultKeyedStateStore<IpAddr>, DefaultClock>;
 
 /// Why a connection was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,39 +46,60 @@ impl Rejection {
     }
 }
 
-/// Per-IP accounting. Entries are dropped once an IP is idle and its bucket has
-/// refilled, so the map tracks active abusers rather than every visitor ever.
-#[derive(Debug)]
-struct IpState {
-    active: usize,
-    tokens: f64,
-    last_refill: Instant,
+/// The parts that a config reload replaces wholesale.
+struct Policy {
+    limits: Limits,
+    /// `None` when rate limiting is switched off.
+    rate: Option<IpRateLimiter>,
 }
 
-#[derive(Debug)]
+impl Policy {
+    fn new(limits: Limits) -> Self {
+        let rate = quota(&limits).map(RateLimiter::keyed);
+        Self { limits, rate }
+    }
+}
+
+/// Turns `burst` connections per `per` into governor's "one cell every N".
+fn quota(limits: &Limits) -> Option<Quota> {
+    if limits.connection_rate.is_disabled() {
+        return None;
+    }
+    let burst = NonZeroU32::new(limits.connection_rate.burst)?;
+    let replenish = limits.connection_rate.per.checked_div(burst.get())?;
+    if replenish.is_zero() {
+        return None;
+    }
+    Some(Quota::with_period(replenish)?.allow_burst(burst))
+}
+
 pub struct Limiter {
-    /// Swappable so a config reload can tighten limits without dropping the
-    /// per-IP state that is currently holding abusers back.
-    limits: ArcSwap<Limits>,
+    policy: ArcSwap<Policy>,
     active: AtomicUsize,
-    per_ip: Mutex<HashMap<IpAddr, IpState>>,
+    /// Live connection count per IP. Entries are removed as they reach zero, so
+    /// this tracks current clients rather than every visitor ever.
+    per_ip: DashMap<IpAddr, usize>,
 }
 
-/// Number of tracked IPs above which idle entries are swept.
-const SWEEP_THRESHOLD: usize = 4096;
+/// Number of tracked buckets above which governor is asked to forget the idle
+/// ones.
+const GC_THRESHOLD: usize = 4096;
 
 impl Limiter {
     pub fn new(limits: Limits) -> Arc<Self> {
         Arc::new(Self {
-            limits: ArcSwap::from_pointee(limits),
+            policy: ArcSwap::from_pointee(Policy::new(limits)),
             active: AtomicUsize::new(0),
-            per_ip: Mutex::new(HashMap::new()),
+            per_ip: DashMap::new(),
         })
     }
 
     /// Applies new limits from a config reload.
+    ///
+    /// In-flight buckets are reset, since the quota they were built from no
+    /// longer exists. Live connection counts are untouched.
     pub fn set_limits(&self, limits: Limits) {
-        self.limits.store(Arc::new(limits));
+        self.policy.store(Arc::new(Policy::new(limits)));
     }
 
     pub fn active(&self) -> usize {
@@ -78,7 +107,7 @@ impl Limiter {
     }
 
     pub fn tracked_ips(&self) -> usize {
-        self.per_ip.lock().expect("limiter lock").len()
+        self.per_ip.len()
     }
 
     /// Admits a connection, or explains why not.
@@ -88,54 +117,51 @@ impl Limiter {
     pub fn admit(self: &Arc<Self>, ip: IpAddr) -> Result<Permit, Rejection> {
         // Normalise `::ffff:1.2.3.4` so a dual-stack listener does not give the
         // same client two separate budgets.
-        let ip = cidr::unmap(ip);
-        let limits = self.limits.load();
+        let ip = unmap(ip);
+        let policy = self.policy.load();
 
-        let global = self.active.fetch_add(1, Ordering::AcqRel) + 1;
         // Built before any early return so every rejection path still releases
         // the global slot when it drops.
         let mut permit = Permit { limiter: Arc::clone(self), ip, counted_per_ip: false };
-        if limits.max_connections != 0 && global > limits.max_connections {
+
+        let global = self.active.fetch_add(1, Ordering::AcqRel) + 1;
+        if policy.limits.max_connections != 0 && global > policy.limits.max_connections {
             return Err(Rejection::GlobalLimit);
         }
 
-        if limits.exempt.contains(ip) {
+        if policy.limits.exempt.contains(ip) {
             return Ok(permit);
         }
 
-        let mut table = self.per_ip.lock().expect("limiter lock");
-        if table.len() >= SWEEP_THRESHOLD {
-            sweep(&mut table, limits.connection_rate.per.get());
-        }
-
-        let now = Instant::now();
-        let burst = f64::from(limits.connection_rate.burst);
-        let entry = table.entry(ip).or_insert_with(|| IpState {
-            active: 0,
-            tokens: burst,
-            last_refill: now,
-        });
-
-        if limits.max_connections_per_ip != 0 && entry.active >= limits.max_connections_per_ip {
+        // The concurrency cap is checked first, and deliberately does not
+        // charge the rate bucket: a client sitting at its connection limit is
+        // not the same thing as a client connecting too fast, and mixing the
+        // two makes both counters unreadable.
+        let max_per_ip = policy.limits.max_connections_per_ip;
+        if max_per_ip != 0 && self.per_ip.get(&ip).is_some_and(|count| *count >= max_per_ip) {
             return Err(Rejection::PerIpLimit);
         }
 
-        if !limits.connection_rate.is_disabled() {
-            let window = limits.connection_rate.per.get().as_secs_f64();
-            let elapsed = now.duration_since(entry.last_refill).as_secs_f64();
-            entry.tokens = (entry.tokens + burst * elapsed / window).min(burst);
-            entry.last_refill = now;
-
-            if entry.tokens < 1.0 {
+        if let Some(rate) = &policy.rate {
+            if rate.len() >= GC_THRESHOLD {
+                rate.retain_recent();
+            }
+            if rate.check_key(&ip).is_err() {
                 return Err(Rejection::RateLimited);
             }
-            entry.tokens -= 1.0;
         }
 
-        entry.active += 1;
-        drop(table);
+        if max_per_ip != 0 {
+            // Re-checked under the entry lock: two connections from the same IP
+            // must not both pass the read above.
+            let mut entry = self.per_ip.entry(ip).or_insert(0);
+            if *entry >= max_per_ip {
+                return Err(Rejection::PerIpLimit);
+            }
+            *entry += 1;
+            permit.counted_per_ip = true;
+        }
 
-        permit.counted_per_ip = true;
         Ok(permit)
     }
 
@@ -144,22 +170,18 @@ impl Limiter {
         if !counted_per_ip {
             return;
         }
-        let mut table = self.per_ip.lock().expect("limiter lock");
-        if let Some(entry) = table.get_mut(&ip) {
-            entry.active = entry.active.saturating_sub(1);
+        // `remove_if` keeps the map at the size of the live client set.
+        if let dashmap::Entry::Occupied(mut entry) = self.per_ip.entry(ip) {
+            let value = entry.get_mut();
+            *value = value.saturating_sub(1);
+            if *value == 0 {
+                entry.remove();
+            }
         }
     }
-
-}
-
-/// Drops entries that hold no connections and whose bucket has refilled.
-fn sweep(table: &mut HashMap<IpAddr, IpState>, window: std::time::Duration) {
-    let now = Instant::now();
-    table.retain(|_, entry| entry.active > 0 || now.duration_since(entry.last_refill) < window);
 }
 
 /// Holds a connection slot for the lifetime of the connection.
-#[derive(Debug)]
 pub struct Permit {
     limiter: Arc<Limiter>,
     ip: IpAddr,
@@ -172,16 +194,36 @@ impl Drop for Permit {
     }
 }
 
+impl std::fmt::Debug for Permit {
+    /// Printed without the limiter it points back at, which would recurse into
+    /// the whole per-IP table.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Permit")
+            .field("ip", &self.ip)
+            .field("counted_per_ip", &self.counted_per_ip)
+            .finish()
+    }
+}
+
+/// How long a rate-limited client would have to wait, for logging.
+pub fn retry_hint(limits: &Limits) -> Duration {
+    limits
+        .connection_rate
+        .per
+        .checked_div(limits.connection_rate.burst.max(1))
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mc_config::{HumanDuration, IpNet, IpNets, RateLimit};
+    use mc_config::{IpNet, IpNets, RateLimit};
 
     fn limits() -> Limits {
         Limits {
             max_connections: 10,
             max_connections_per_ip: 2,
-            connection_rate: RateLimit { burst: 3, per: HumanDuration::from_secs(60) },
+            connection_rate: RateLimit { burst: 3, per: Duration::from_secs(60) },
             max_handshake_bytes: 8192,
             exempt: IpNets::default(),
         }
@@ -206,16 +248,20 @@ mod tests {
 
         drop((second, third));
         assert_eq!(limiter.active(), 0);
+        assert_eq!(limiter.tracked_ips(), 0, "the map shrinks back to live clients");
     }
 
     #[test]
     fn a_rejected_connection_does_not_leak_a_global_slot() {
-        let limiter = Limiter::new(limits());
+        let mut limits = limits();
+        // Take the rate limiter out of the picture so the per-IP cap is what
+        // rejects.
+        limits.connection_rate = RateLimit { burst: 0, per: Duration::from_secs(60) };
+        let limiter = Limiter::new(limits);
         let client = ip("203.0.113.7");
         let _held: Vec<_> = (0..2).map(|_| limiter.admit(client).unwrap()).collect();
 
         for _ in 0..50 {
-            // Each rejection returns a dropped permit, so `active` must not grow.
             assert!(limiter.admit(client).is_err());
         }
         assert_eq!(limiter.active(), 2);
@@ -225,15 +271,14 @@ mod tests {
     fn the_rate_bucket_empties_and_refills() {
         let mut limits = limits();
         limits.max_connections_per_ip = 0;
-        limits.connection_rate = RateLimit { burst: 3, per: HumanDuration::from_millis(300) };
+        limits.connection_rate = RateLimit { burst: 3, per: Duration::from_millis(300) };
         let limiter = Limiter::new(limits);
         let client = ip("203.0.113.7");
 
-        // Burst of 3, then the fourth is refused.
         let _burst: Vec<_> = (0..3).map(|_| limiter.admit(client).unwrap()).collect();
         assert_eq!(limiter.admit(client).unwrap_err(), Rejection::RateLimited);
 
-        std::thread::sleep(std::time::Duration::from_millis(150));
+        std::thread::sleep(Duration::from_millis(150));
         assert!(limiter.admit(client).is_ok(), "the bucket refills over time");
     }
 
@@ -284,21 +329,28 @@ mod tests {
     }
 
     #[test]
-    fn idle_entries_are_swept_so_the_table_cannot_grow_without_bound() {
+    fn a_reload_can_tighten_limits() {
+        let limiter = Limiter::new(limits());
+        let client = ip("203.0.113.7");
+        let _first = limiter.admit(client).unwrap();
+
+        let mut tighter = limits();
+        tighter.max_connections_per_ip = 1;
+        limiter.set_limits(tighter);
+
+        assert_eq!(limiter.admit(client).unwrap_err(), Rejection::PerIpLimit);
+    }
+
+    #[test]
+    fn a_disabled_rate_limit_admits_freely() {
         let mut limits = limits();
         limits.max_connections = 0;
-        limits.connection_rate = RateLimit { burst: 1000, per: HumanDuration::from_millis(1) };
+        limits.max_connections_per_ip = 0;
+        limits.connection_rate = RateLimit { burst: 0, per: Duration::from_secs(60) };
         let limiter = Limiter::new(limits);
 
-        for i in 0..SWEEP_THRESHOLD + 100 {
-            let octet = i % 256;
-            let addr = ip(&format!("198.51.{}.{octet}", (i / 256) % 256));
-            drop(limiter.admit(addr));
-        }
-        assert!(
-            limiter.tracked_ips() < SWEEP_THRESHOLD + 100,
-            "expected a sweep, still tracking {}",
-            limiter.tracked_ips()
-        );
+        let client = ip("203.0.113.7");
+        let held: Vec<_> = (0..100).map(|_| limiter.admit(client).unwrap()).collect();
+        assert_eq!(held.len(), 100);
     }
 }

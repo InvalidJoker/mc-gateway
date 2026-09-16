@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use mc_config::{BackendKind, Config, Forwarding, Health, Policy, Rule};
+use mc_config::{BackendKind, Config, Health, Policy, Rule};
 
 use crate::matcher::Matcher;
 
@@ -21,7 +21,6 @@ pub struct Backend {
     /// `host:port`, resolved per connect.
     pub address: String,
     pub kind: BackendKind,
-    pub forwarding: Forwarding,
     pub weight: u32,
     /// 0 means unlimited.
     pub max_connections: usize,
@@ -264,7 +263,6 @@ impl Registry {
                 name: name.clone(),
                 address: server.address.clone(),
                 kind: server.kind,
-                forwarding: server.forwarding,
                 weight: server.weight,
                 max_connections: server.max_connections,
                 group: server.group.clone(),

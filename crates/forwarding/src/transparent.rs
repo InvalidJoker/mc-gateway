@@ -2,22 +2,21 @@
 //!
 //! The outbound socket is bound to the client's own address before connecting,
 //! so the backend's `accept()` reports the real player IP. Nothing is added to
-//! the byte stream, which is why this is the only method that works for vanilla
-//! and for the modloaders built on it.
+//! the byte stream, which is why this works for vanilla and for every modloader
+//! without any support on their side.
 //!
 //! Three things are required on the host, and all three are outside this
-//! process (see `deploy/nftables/`):
+//! process (see `deploy/nftables/` and `docs/forwarding.md`):
 //!
 //! 1. `CAP_NET_ADMIN` (or root) to set `IP_TRANSPARENT`
 //! 2. a routing rule that brings the backend's replies back to the gateway
-//! 3. backends whose default route points at the gateway, or policy routing
-//!    that has the same effect
+//! 3. backends whose return path leads through the gateway
 
 use std::{io, net::SocketAddr};
 
 use tokio::net::TcpStream;
 
-/// Whether this build can do transparent connections at all.
+/// Whether this build can make transparent connections at all.
 pub const fn is_supported() -> bool {
     cfg!(target_os = "linux")
 }
@@ -26,18 +25,15 @@ pub const fn is_supported() -> bool {
 pub async fn connect(backend: SocketAddr, client: SocketAddr) -> io::Result<TcpStream> {
     use std::os::fd::{FromRawFd, IntoRawFd};
 
-    use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+    use socket2::SockAddr;
     use tokio::net::TcpSocket;
 
     let bind_addr = match_family(client, backend)?;
-    let domain = if backend.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
-
-    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
-    socket.set_nonblocking(true)?;
+    let socket = transparent_socket(backend.is_ipv4())?;
     // Without SO_REUSEADDR a client reconnecting from the same port while the
     // previous socket lingers in TIME_WAIT would be refused.
     socket.set_reuse_address(true)?;
-    set_transparent(&socket, backend.is_ipv4())?;
+    socket.set_nonblocking(true)?;
     socket.bind(&SockAddr::from(bind_addr))?;
 
     // Hand the configured fd to tokio, which drives the non-blocking connect.
@@ -45,51 +41,54 @@ pub async fn connect(backend: SocketAddr, client: SocketAddr) -> io::Result<TcpS
     tcp.connect(backend).await
 }
 
+/// Creates a socket with `IP_TRANSPARENT` set, with a diagnosable error.
 #[cfg(target_os = "linux")]
-fn set_transparent(socket: &socket2::Socket, ipv4: bool) -> io::Result<()> {
-    use std::os::fd::AsRawFd;
+fn transparent_socket(ipv4: bool) -> io::Result<socket2::Socket> {
+    use socket2::{Domain, Protocol, Socket, Type};
 
-    // libc exposes these as plain ints; going through setsockopt directly keeps
-    // this independent of socket2's shifting helper names.
-    let (level, option) = if ipv4 {
-        (libc::IPPROTO_IP, libc::IP_TRANSPARENT)
+    let domain = if ipv4 { Domain::IPV4 } else { Domain::IPV6 };
+    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+
+    let result = if ipv4 {
+        socket.set_ip_transparent_v4(true)
     } else {
-        (libc::IPPROTO_IPV6, libc::IPV6_TRANSPARENT)
-    };
-    let enable: libc::c_int = 1;
-
-    // SAFETY: the fd is owned by `socket` and outlives the call; the option
-    // value is a correctly sized and aligned c_int.
-    let rc = unsafe {
-        libc::setsockopt(
-            socket.as_raw_fd(),
-            level,
-            option,
-            std::ptr::from_ref(&enable).cast(),
-            size_of::<libc::c_int>() as libc::socklen_t,
-        )
+        socket.set_ip_transparent_v6(true)
     };
 
-    if rc != 0 {
-        let err = io::Error::last_os_error();
-        return Err(io::Error::new(
+    result.map_err(|err| {
+        io::Error::new(
             err.kind(),
             format!(
                 "cannot set IP_TRANSPARENT ({err}); the gateway needs CAP_NET_ADMIN \
                  (systemd: AmbientCapabilities=CAP_NET_ADMIN)"
             ),
-        ));
-    }
-    Ok(())
+        )
+    })?;
+
+    Ok(socket)
+}
+
+/// Verifies at start-up that transparent sockets can actually be created.
+///
+/// Without this the first player is the one who discovers that the capability
+/// is missing, and the symptom — every backend connection failing — looks like
+/// a network problem rather than a permissions one.
+#[cfg(target_os = "linux")]
+pub fn preflight() -> io::Result<()> {
+    transparent_socket(true).map(drop)
 }
 
 #[cfg(not(target_os = "linux"))]
 pub async fn connect(_backend: SocketAddr, _client: SocketAddr) -> io::Result<TcpStream> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "transparent forwarding requires Linux TPROXY; use `forwarding: proxy_protocol_v2` \
-         or `none` on this platform",
+        "transparent forwarding requires Linux TPROXY",
     ))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn preflight() -> io::Result<()> {
+    Ok(())
 }
 
 /// Makes the client address usable as a bind address for a socket of the
@@ -117,7 +116,7 @@ fn match_family(client: SocketAddr, backend: SocketAddr) -> io::Result<SocketAdd
             io::ErrorKind::InvalidInput,
             format!(
                 "cannot transparently connect an IPv6 client ({client}) to an IPv4 backend \
-                 ({backend}); give the backend an IPv6 address or use proxy_protocol_v2"
+                 ({backend}); give the backend an IPv6 address"
             ),
         )),
     }
@@ -153,12 +152,6 @@ mod tests {
     #[cfg(not(target_os = "linux"))]
     fn reports_unsupported_off_linux() {
         assert!(!is_supported());
-        let err = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(connect(addr("10.0.0.1:25565"), addr("203.0.113.7:51234")))
-            .unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+        assert!(preflight().is_ok(), "nothing to check when TPROXY is not used");
     }
 }

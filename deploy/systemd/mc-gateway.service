@@ -17,8 +17,9 @@ User=mc-gateway
 Group=mc-gateway
 ConfigurationDirectory=mc-gateway
 
-# CAP_NET_ADMIN is only needed for `forwarding: transparent` (TPROXY).
-# Drop it from both lines if every backend uses proxy_protocol_v2 or none.
+# CAP_NET_ADMIN is required on Linux: every backend connection is transparent
+# (TPROXY), and without this the gateway refuses to start. It also needs the
+# routing setup from deploy/nftables/ — see docs/forwarding.md.
 # CAP_NET_BIND_SERVICE is only needed for ports below 1024.
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
@@ -49,6 +50,10 @@ SystemCallErrorNumber=EPERM
 
 # One file descriptor per client plus one per backend connection.
 LimitNOFILE=131072
+
+# The divert rules and routing table TPROXY depends on. Remove this if you set
+# them up some other way (a boot script, your configuration management).
+ExecStartPre=+/usr/local/lib/mc-gateway/tproxy-setup.sh
 
 [Install]
 WantedBy=multi-user.target

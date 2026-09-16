@@ -1,8 +1,8 @@
 #!/usr/sbin/nft -f
 #
-# Return path for `forwarding: transparent`.
+# Return path for transparent backend connections.
 #
-# With TPROXY the gateway opens the backend connection using the *player's*
+# On Linux the gateway always opens backend connections using the *player's*
 # source address. The backend therefore replies to the player's IP, and those
 # replies have to find their way back into the gateway's socket instead of being
 # routed out to the internet.

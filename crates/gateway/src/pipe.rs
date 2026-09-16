@@ -4,133 +4,49 @@
 //! must not, or compression, encryption and every modloader's custom packets
 //! would become its problem. This is the part that stays a plain L4 proxy.
 
-use std::{
-    io,
-    pin::pin,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::Duration,
-};
+use std::{io, time::Duration};
 
-use mc_metrics::Metrics;
-use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::TcpStream,
-    time,
-};
-
-/// Chunk loading moves a lot of data; anything smaller wastes syscalls.
-const BUFFER_SIZE: usize = 32 * 1024;
-
-/// Grace period for the second direction once the first has closed.
-///
-/// Minecraft never half-closes a connection on purpose, so once one side is
-/// done the session is over. This window only exists so the last few bytes
-/// already in flight still arrive.
-const LINGER: Duration = Duration::from_secs(2);
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct Transferred {
-    pub to_backend: u64,
-    pub to_client: u64,
-}
+use tokio::{io::copy_bidirectional, net::TcpStream};
+use tokio_io_timeout::TimeoutStream;
 
 /// Copies in both directions until either side closes.
 ///
 /// `idle` bounds how long a direction may be silent. Without it a half-open
 /// connection — a client that vanished without a FIN, which on mobile networks
 /// is routine — would hold a backend slot indefinitely.
+///
+/// Returns `(to_backend, to_client)` on a clean close. On a timeout or a reset
+/// the byte counts are lost, which is a deliberate trade: `copy_bidirectional`
+/// does the half-close handling correctly, and that is worth more than exact
+/// accounting for aborted sessions.
 pub async fn run(
-    mut client: TcpStream,
-    mut backend: TcpStream,
+    client: TcpStream,
+    backend: TcpStream,
     idle: Option<Duration>,
-    metrics: &Arc<Metrics>,
-) -> Transferred {
-    let (client_read, client_write) = client.split();
-    let (backend_read, backend_write) = backend.split();
-
-    // Counters live outside the futures so a direction that gets cancelled
-    // still contributes what it managed to copy.
-    let to_backend = AtomicU64::new(0);
-    let to_client = AtomicU64::new(0);
-
-    {
-        let mut upstream = pin!(pump(client_read, backend_write, idle, &to_backend));
-        let mut downstream = pin!(pump(backend_read, client_write, idle, &to_client));
-
-        // Whichever side finishes first ends the session; the other gets a
-        // bounded grace period to flush. Waiting for it unconditionally would
-        // hang forever on a client that never sends a FIN.
-        tokio::select! {
-            _ = &mut upstream => {
-                let _ = time::timeout(LINGER, &mut downstream).await;
-            }
-            _ = &mut downstream => {
-                let _ = time::timeout(LINGER, &mut upstream).await;
-            }
-        }
-    }
-
-    let transferred = Transferred {
-        to_backend: to_backend.load(Ordering::Relaxed),
-        to_client: to_client.load(Ordering::Relaxed),
-    };
-    metrics.bytes.add("to_backend", transferred.to_backend);
-    metrics.bytes.add("to_client", transferred.to_client);
-    transferred
+) -> io::Result<(u64, u64)> {
+    let mut client = timed(client, idle);
+    let mut backend = timed(backend, idle);
+    copy_bidirectional(&mut client, &mut backend).await
 }
 
-/// One direction. Shuts the writer down on completion so the peer sees a clean
-/// close rather than a reset, which is what ends the opposite direction too.
-async fn pump<R, W>(
-    mut from: R,
-    mut to: W,
-    idle: Option<Duration>,
-    counter: &AtomicU64,
-) -> io::Result<u64>
-where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
-{
-    let mut buf = vec![0u8; BUFFER_SIZE];
-    let mut total = 0u64;
-
-    let result = loop {
-        let read = match idle {
-            Some(limit) => match time::timeout(limit, from.read(&mut buf)).await {
-                Ok(result) => result,
-                Err(_) => break Err(io::Error::new(io::ErrorKind::TimedOut, "idle timeout")),
-            },
-            None => from.read(&mut buf).await,
-        };
-
-        match read {
-            Ok(0) => break Ok(total),
-            Ok(n) => {
-                if let Err(err) = to.write_all(&buf[..n]).await {
-                    break Err(err);
-                }
-                total += n as u64;
-                counter.store(total, Ordering::Relaxed);
-            }
-            Err(err) => break Err(err),
-        }
-    };
-
-    // Best effort: the peer may already be gone.
-    let _ = to.shutdown().await;
-    result.map(|_| total).or(Ok(total))
+/// Applies the idle timeout to both directions of one stream.
+fn timed(stream: TcpStream, idle: Option<Duration>) -> std::pin::Pin<Box<TimeoutStream<TcpStream>>> {
+    let mut stream = TimeoutStream::new(stream);
+    stream.set_read_timeout(idle);
+    stream.set_write_timeout(idle);
+    Box::pin(stream)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::net::TcpListener;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        time,
+    };
 
-    /// Returns (client side, backend side) of two connected socket pairs plus
-    /// the far ends a test can drive.
+    /// Two ends of one connection.
     async fn pair() -> (TcpStream, TcpStream) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -143,12 +59,8 @@ mod tests {
     async fn moves_bytes_in_both_directions() {
         let (client_far, client_near) = pair().await;
         let (backend_near, backend_far) = pair().await;
-        let metrics = Metrics::new();
 
-        let proxy = tokio::spawn({
-            let metrics = Arc::clone(&metrics);
-            async move { run(client_near, backend_near, None, &metrics).await }
-        });
+        let proxy = tokio::spawn(async move { run(client_near, backend_near, None).await });
 
         let echo = tokio::spawn(async move {
             let mut backend_far = backend_far;
@@ -167,42 +79,34 @@ mod tests {
         client_far.read_to_end(&mut reply).await.unwrap();
         assert_eq!(reply, b"pong");
         assert_eq!(echo.await.unwrap(), b"ping");
-
-        let transferred = proxy.await.unwrap();
-        assert_eq!(transferred, Transferred { to_backend: 4, to_client: 4 });
-        assert_eq!(metrics.bytes.get("to_backend"), 4);
-        assert_eq!(metrics.bytes.get("to_client"), 4);
+        assert_eq!(proxy.await.unwrap().unwrap(), (4, 4));
     }
 
     #[tokio::test]
     async fn a_silent_connection_is_closed_by_the_idle_timeout() {
         let (client_far, client_near) = pair().await;
         let (backend_near, backend_far) = pair().await;
-        let metrics = Metrics::new();
 
-        let proxy = tokio::spawn({
-            let metrics = Arc::clone(&metrics);
-            async move {
-                run(client_near, backend_near, Some(Duration::from_millis(100)), &metrics).await
-            }
+        let proxy = tokio::spawn(async move {
+            run(client_near, backend_near, Some(Duration::from_millis(100))).await
         });
 
         // Neither end says anything; the proxy must give up on its own.
-        let transferred =
-            time::timeout(Duration::from_secs(5), proxy).await.expect("idle timeout fired");
-        assert_eq!(transferred.unwrap(), Transferred::default());
+        let result = time::timeout(Duration::from_secs(5), proxy)
+            .await
+            .expect("idle timeout fired")
+            .unwrap();
+        assert!(result.is_err(), "an idle session ends as an error, not a clean close");
         drop((client_far, backend_far));
     }
 
     #[tokio::test]
-    async fn a_backend_disconnect_ends_the_session() {
+    async fn a_backend_disconnect_releases_the_client() {
         let (client_far, client_near) = pair().await;
         let (backend_near, backend_far) = pair().await;
-        let metrics = Metrics::new();
 
-        let proxy = tokio::spawn({
-            let metrics = Arc::clone(&metrics);
-            async move { run(client_near, backend_near, None, &metrics).await }
+        let proxy = tokio::spawn(async move {
+            run(client_near, backend_near, Some(Duration::from_millis(200))).await
         });
 
         drop(backend_far);
@@ -215,8 +119,7 @@ mod tests {
             .unwrap();
         assert!(buf.is_empty());
 
-        // The still-open, silent client direction must not keep the session
-        // alive; the linger window bounds it.
-        time::timeout(LINGER * 2, proxy).await.expect("session ended").unwrap();
+        // The still-open, silent client direction is bounded by the idle timeout.
+        time::timeout(Duration::from_secs(5), proxy).await.expect("session ended").unwrap().ok();
     }
 }

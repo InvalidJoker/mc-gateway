@@ -9,11 +9,12 @@ description = "Host matching, backend registry, selection policies and health ch
 [dependencies]
 mc-config = { workspace = true }
 mc-forwarding = { workspace = true }
-mc-protocol = { workspace = true }
-serde_json = { workspace = true }
+
+craftping = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+mc-protocol = { workspace = true }
 tokio = { workspace = true, features = ["rt", "test-util"] }

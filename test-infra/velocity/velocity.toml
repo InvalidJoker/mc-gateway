@@ -6,9 +6,10 @@ show-max-players = 100
 online-mode = false
 player-info-forwarding-mode = "legacy"
 
-# This is the line that matters: Velocity reads the PROXY header the gateway
-# writes, so it sees the real player IP instead of the gateway's.
-haproxy-protocol = true
+# The gateway sends no PROXY header — on Linux it connects transparently, so
+# Velocity already sees the player's real address at the TCP layer. Turning this
+# on would make Velocity wait for a header that never arrives.
+haproxy-protocol = false
 
 [servers]
 lobby = "paper:25565"

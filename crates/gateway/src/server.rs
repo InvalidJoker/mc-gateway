@@ -6,14 +6,12 @@
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use mc_config::Loaded;
-use mc_metrics::exporter::{Exporter, serve as serve_metrics};
 use tokio::{sync::mpsc, task::JoinHandle, time};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::{
     app::{App, ListenerRuntime},
-    collector::RegistryCollector,
-    listener,
+    listener, observe,
 };
 
 /// A running gateway.
@@ -35,11 +33,10 @@ impl Server {
     /// Binding happens before anything else so that a port clash is a start-up
     /// failure rather than a half-running gateway.
     pub async fn start(loaded: Loaded, config_path: PathBuf) -> Result<Self, String> {
-        for (name, server) in &loaded.config.servers {
-            if let Err(why) = mc_forwarding::check_platform_support(server.forwarding) {
-                return Err(format!("server `{name}`: {why}"));
-            }
-        }
+        // On Linux every backend connection is transparent, which needs
+        // CAP_NET_ADMIN. Finding that out here beats finding it out on the
+        // first player, where the symptom looks like a network fault.
+        mc_forwarding::preflight()?;
 
         let mut bound = Vec::new();
         for listener in &loaded.config.listeners {
@@ -51,8 +48,8 @@ impl Server {
         }
 
         let metrics_config = loaded.config.metrics.clone();
-        let drain = loaded.config.timeouts.drain.get();
-        let app = App::start(loaded, config_path).await;
+        let drain = loaded.config.timeouts.drain;
+        let app = App::start(loaded, config_path);
 
         let (sessions, sessions_done) = mpsc::channel::<()>(1);
         let mut addresses = Vec::new();
@@ -70,18 +67,17 @@ impl Server {
         }
 
         if metrics_config.enabled {
-            let exporter = Arc::new(
-                Exporter::new(Arc::clone(&app.metrics))
-                    .with_collector(RegistryCollector::new(Arc::clone(&app.runtime))),
-            );
-            let shutdown = app.shutdown_signal();
-            let bind = metrics_config.bind;
-            tokio::spawn(async move {
-                if let Err(err) = serve_metrics(bind, exporter, shutdown).await {
-                    error!(%bind, %err, "metrics endpoint failed");
-                }
-            });
+            observe::install(metrics_config.bind)?;
+            tokio::spawn(observe::run_gauges(
+                Arc::clone(&app.runtime),
+                app.shutdown_signal(),
+            ));
         }
+
+        info!(
+            forwarding = %mc_forwarding::Mode::current(),
+            "backend connections use this mode on this platform"
+        );
 
         Ok(Self {
             app,

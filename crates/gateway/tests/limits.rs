@@ -52,7 +52,6 @@ async fn too_many_connections_from_one_ip_are_dropped() {
     assert!(response.is_empty(), "no payload, got {read:?}");
     assert_eq!(backend.connection_count(), 2, "the third never reached a backend");
 
-    assert_eq!(server.app.metrics.connections_rejected.get("per_ip_limit"), 1);
 
     server.shutdown().await;
 }
@@ -72,10 +71,9 @@ async fn an_emptied_rate_bucket_produces_a_readable_kick() {
     let mut refused = login(address, "survival.example.net", "Carol").await;
     assert_eq!(
         read_kick(&mut refused).await,
-        "\u{a7}cSlow down",
+        "Slow down",
         "a rate-limited player should learn why, not just see a reset"
     );
-    assert_eq!(server.app.metrics.connections_rejected.get("rate_limited"), 1);
 
     server.shutdown().await;
 }
@@ -110,8 +108,7 @@ health:
     backend.wait_for_connections(1).await;
 
     let mut second = login(address, "survival.example.net", "Bob").await;
-    assert_eq!(read_kick(&mut second).await, "\u{a7}cServer full");
-    assert_eq!(server.app.metrics.connections_rejected.get("target_full"), 1);
+    assert_eq!(read_kick(&mut second).await, "Server full");
 
     server.shutdown().await;
 }
@@ -193,28 +190,23 @@ async fn an_oversized_handshake_is_cut_off() {
         .expect("the gateway hung up")
         .ok();
     assert_eq!(backend.connection_count(), 0);
-    assert_eq!(server.app.metrics.connections_rejected.get("handshake_too_large"), 1);
 
     server.shutdown().await;
 }
 
 #[tokio::test]
-async fn counters_track_the_happy_path_too() {
-    let backend = FakeBackend::start(Behaviour::Echo).await;
+async fn a_login_and_a_ping_both_reach_the_backend() {
+    let backend = FakeBackend::start(Behaviour::Status(common::paper_status("hi", 0))).await;
     let server = gateway(&config(&backend.address.to_string(), "  max_connections_per_ip: 0")).await;
     let address = server.address("public").unwrap();
 
     let _client = login(address, "survival.example.net", "Alice").await;
-    backend.wait_for_connections(1).await;
     let _status = common::status_ping(address, "survival.example.net", 767).await;
 
-    let metrics = &server.app.metrics;
-    assert_eq!(metrics.status_requests.get("gateway"), 1);
-    assert_eq!(metrics.backend_connections.get("survival"), 1);
-    assert!(metrics.connections_total.load(std::sync::atomic::Ordering::Relaxed) >= 2);
-
-    let rendered = metrics.render(None);
-    assert!(rendered.contains("mc_gateway_login_attempts_total 1"), "{rendered}");
+    // Both the login and the status ping reach the backend: a ping is proxied
+    // now, not answered locally.
+    let seen = backend.wait_for_payload_connections(2).await;
+    assert_eq!(seen.len(), 2);
 
     server.shutdown().await;
 }

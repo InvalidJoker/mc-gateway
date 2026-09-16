@@ -1,0 +1,39 @@
+# Configuration used by smoke.py. The backends are the fake servers that
+# script starts, not real ones.
+listeners:
+  - name: public
+    bind: "127.0.0.1:25599"
+
+routing:
+  default: survival
+  rules:
+    - host: "modded.example.net"
+      target: modded
+
+servers:
+  survival:
+    address: "127.0.0.1:25601"
+    kind: paper
+  modded:                       # nothing listens here: the offline path
+    address: "127.0.0.1:25602"
+    kind: neoforge
+
+motd:
+  line2: "&b&lMY NETWORK &8» &7survival &8• &7modded"
+  offline:
+    text: "&cThis server is currently offline"
+
+timeouts:
+  idle: 5s
+  drain: 2s
+
+health:
+  method: tcp
+  interval: 1s
+  timeout: 500ms
+  fall: 1
+  rise: 1
+
+metrics:
+  enabled: true
+  bind: "127.0.0.1:9199"

@@ -5,7 +5,18 @@
 # fails loudly if the gateway ever stops being the only way in.
 #
 #   docker compose up -d
-#   python3 smoke.py docker compose exec ...   # or point a client at :25565
+#   # then point a client at localhost:25565
+#
+# ON LINUX, READ THIS FIRST
+# -------------------------
+# The gateway connects to backends transparently (TPROXY), which needs
+# CAP_NET_ADMIN *and* a return path: the backend replies to the player's own IP,
+# and those packets have to come back to the gateway. A default docker bridge
+# network does not do that, so sessions will hang.
+#
+# Either give this network the host setup from deploy/nftables/ and make the
+# gateway container the backends' default route, or run this compose file on
+# macOS/Windows (Docker Desktop), where the gateway connects normally.
 
 name: mc-gateway-test
 
@@ -19,13 +30,15 @@ services:
       - "127.0.0.1:9100:9100"
     volumes:
       - ./gateway/config.yaml:/etc/mc-gateway/config.yaml:ro
+    # Required on Linux: without it the gateway refuses to start, because it
+    # cannot create transparent sockets.
+    cap_add: [NET_ADMIN]
     networks: [edge, backend]
     depends_on: [vanilla, paper, velocity]
     restart: unless-stopped
 
-  # Vanilla cannot read a PROXY header. On Linux it would use TPROXY; in this
-  # compose file it runs with `forwarding: none`, which still proves routing,
-  # MOTD and the pipe.
+  # Vanilla needs no proxy support of any kind: it is reached either
+  # transparently or directly, and sees plain Minecraft bytes either way.
   vanilla:
     image: itzg/minecraft-server:latest
     environment:
@@ -37,10 +50,8 @@ services:
     networks: [backend]
     volumes: [vanilla-data:/data]
 
-  # Paper reads the PROXY protocol once `settings.proxy-protocol: true` is set
-  # in spigot.yml. The container writes that file on first start, so set it
-  # afterwards and restart:
-  #   docker compose exec paper sed -i 's/proxy-protocol: false/proxy-protocol: true/' /data/spigot.yml
+  # Paper also needs nothing configured. Leave `proxy-protocol` off in
+  # spigot.yml: the gateway sends no header.
   paper:
     image: itzg/minecraft-server:latest
     environment:
@@ -52,8 +63,8 @@ services:
     networks: [backend]
     volumes: [paper-data:/data]
 
-  # Velocity behind the gateway: a proxy behind a proxy, which is the case the
-  # forwarding rules have to get right.
+  # Velocity behind the gateway: a proxy behind a proxy. Velocity keeps doing
+  # its own authentication and its own forwarding to the servers behind it.
   velocity:
     image: itzg/bungeecord:latest
     environment:

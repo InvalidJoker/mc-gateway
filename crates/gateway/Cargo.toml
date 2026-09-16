@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "A Minecraft edge gateway: routing, central MOTD and client IP forwarding"
+description = "A Minecraft edge gateway: routing, MOTD rewriting and transparent forwarding"
 
 [[bin]]
 name = "mc-gateway"
@@ -17,16 +17,21 @@ path = "src/lib.rs"
 [dependencies]
 mc-config = { workspace = true }
 mc-forwarding = { workspace = true }
-mc-metrics = { workspace = true }
 mc-protocol = { workspace = true }
 mc-routing = { workspace = true }
 
 arc-swap = { workspace = true }
-base64 = { workspace = true }
 clap = { workspace = true }
+dashmap = { workspace = true }
+governor = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml_ng = { workspace = true }
-thiserror = { workspace = true }
-tokio = { workspace = true, features = ["fs"] }
+tokio = { workspace = true }
+tokio-io-timeout = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+proxy-header = { workspace = true }

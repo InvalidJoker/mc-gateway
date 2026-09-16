@@ -161,7 +161,7 @@ fn init_logging(config: &Config, level_override: Option<&str>) {
     let level = level_override.unwrap_or(&config.log.level);
     // RUST_LOG wins, so an operator can raise the level without editing files.
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(format!("mc_gateway={level},mc_routing={level},mc_forwarding={level},mc_metrics={level},warn")));
+        .unwrap_or_else(|_| EnvFilter::new(format!("mc_gateway={level},mc_routing={level},mc_forwarding={level},warn")));
 
     let builder = fmt().with_env_filter(filter).with_target(false);
     match config.log.format {
