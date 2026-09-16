@@ -36,6 +36,7 @@ Covered by automated tests in this repository:
 | inbound PROXY v1/v2 parsing, and untrusted headers ignored | `crates/forwarding/src/inbound.rs`, `tests/forwarding.rs` |
 | the Prometheus endpoint, scraped over HTTP | `tests/metrics.rs` |
 | the compiled binary, end to end | `test-infra/smoke.py` |
+| TPROXY in Docker: the backend sees the client's own address and port | `test-infra/tproxy-check/run.sh` |
 
 ## Not verified here
 
@@ -51,7 +52,12 @@ the protocol work is tested, the *integration* is not.
 | 1.16.5 | ? | ? | ? | ? | – | ? |
 | 1.18.2 | ? | ? | ? | ? | – | ? |
 | 1.20.1 | ? | ? | ? | ? | ? | ? |
-| 1.21.x | ? | ? | ? | ? | ? | ? |
+| 1.21.x | ? | ◐ | ? | ? | ? | ? |
+
+◐ Paper 1.21.1, through `test-infra/docker-compose.yml` on OrbStack: its status
+response came through with only line 2 replaced, and a login reached the
+compression step with Paper logging the forwarded address. Not yet a full join
+with a real client.
 
 Fill it in by running each combination rather than assuming it. Three things are
 worth checking per cell:

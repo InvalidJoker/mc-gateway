@@ -380,7 +380,13 @@ async fn proxy(
 
     let idle = config.timeouts.idle;
     let idle = (!idle.is_zero()).then_some(idle);
-    let bytes = pipe::run(stream, upstream, idle).await.ok();
+    // The replayed handshake went to the backend before the pipe started, so
+    // the pipe's own count does not include it.
+    let replayed = replay.len() as u64;
+    let bytes = pipe::run(stream, upstream, idle)
+        .await
+        .ok()
+        .map(|(to_backend, to_client)| (to_backend + replayed, to_client));
 
     Outcome::Proxied {
         backend: backend.name.clone(),

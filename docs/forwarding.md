@@ -81,14 +81,39 @@ Three things are required, and all three live outside this process:
    table, turns off strict reverse-path filtering (the gateway sends packets
    whose source is not its own) and loads `deploy/nftables/tproxy.nft`.
 
-3. **A return path from the backends.** Either the gateway is the backends'
-   default route, or policy routing on each backend sends traffic for player
-   networks back to the gateway.
+3. **A return path from the backends.** Replies to gateway-opened connections
+   must go back via the gateway. Either the gateway is the backends' default
+   route, or each backend runs `deploy/nftables/backend-return-path.sh`:
 
-Point 3 is the one that decides whether this is practical for you. If the
-backends are VMs on a network you control and the gateway is their router, it is
-straightforward. Containers on a default bridge network are not: their replies
-go to the bridge, not to the gateway, and sessions hang.
+   ```bash
+   sudo GATEWAY_IP=10.77.0.2 LOCAL_SUBNET=10.77.0.0/24 deploy/nftables/backend-return-path.sh
+   ```
+
+   It connection-marks new inbound connections whose source is outside the local
+   subnet — which only the gateway can open — and routes just those replies via
+   the gateway. The backend's own traffic keeps its normal route.
+
+### In Docker
+
+Containers are Linux on every host — Docker Desktop and OrbStack on macOS
+included — so this always applies. `test-infra/docker-compose.yml` is a working
+example, and `test-infra/tproxy-check/run.sh` verifies it end to end. Four things
+are needed, and each one's absence makes sessions hang:
+
+| requirement | why |
+|---|---|
+| `cap_add: [NET_ADMIN]` on the gateway | The image's entrypoint sets up the gateway side of the return path, then drops to an unprivileged user that keeps this one capability as an ambient capability. A `USER` line cannot do that: a non-root user gets no effective capabilities from `cap_add`. |
+| masquerading off on the network players arrive on | Docker masquerades any packet from a network's subnet that leaves via another bridge. A transparent connection is exactly that, so the backend would see a bridge address. `com.docker.network.bridge.enable_ip_masquerade: "false"`. |
+| that network is the gateway's first interface | Docker orders interfaces by network name, and desktop port forwarders connect to the first one. If it is the backend network, host traffic arrives from an address inside the backend subnet, which cannot be told apart from a real neighbour. |
+| a return-path sidecar per backend | `network_mode: service:<backend>` running `backend-return-path.sh`. |
+
+Also keep the gateway's fixed address out of Docker's dynamic pool
+(`ip_range`), or a backend that starts first can take it.
+
+From the Mac host, a desktop VM presents your connection as the players
+network's bridge address (e.g. `192.168.167.1`) — that is what the backend logs,
+and it is still the address the gateway saw rather than the gateway's own. A
+client container on that network, or a remote player, shows its real address.
 
 ### Bringing it up
 

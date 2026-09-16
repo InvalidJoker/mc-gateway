@@ -14,7 +14,7 @@ What exists today, and what does not.
 | Pre-1.7 pings detected and forwarded | ✓ |
 | Health checks: TCP and status ping, rise/fall, spread scheduling | ✓ |
 | Backend registry with groups, weights, round-robin / least-connections / failover | ✓ |
-| Linux TPROXY for every backend connection; plain TCP elsewhere | ✓ (code and deployment rules; see Compatibility) |
+| Linux TPROXY for every backend connection; plain TCP elsewhere | ✓ verified in Docker; not yet on a bare-metal network |
 | Inbound PROXY protocol v1/v2 behind a trust boundary | ✓ |
 | Per-IP and global limits, token bucket, handshake byte budget | ✓ |
 | Prometheus metrics and structured logs | ✓ |
@@ -30,8 +30,11 @@ The largest remaining gap. See [compatibility](compatibility.md): the protocol
 handling is tested, the integration with real server software is not. This is
 the next thing to do, and `test-infra/` exists for it.
 
-The TPROXY return path in particular has only been exercised as code, not on a
-real Linux network. That is the single riskiest untested thing in the project.
+TPROXY has been verified in Docker (OrbStack): `test-infra/tproxy-check/`
+asserts that an echo backend sees the client's own address and port, and a real
+Paper 1.21.1 logged the forwarded address for a login through
+`test-infra/docker-compose.yml`. It has not been run on bare-metal hosts or VMs
+routed by a real network, where the return path is set up differently.
 
 ### Load testing
 

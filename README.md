@@ -67,6 +67,11 @@ sudo setcap cap_net_admin+ep ./target/release/mc-gateway
 The return path also has to be set up — see [forwarding](docs/forwarding.md).
 `deploy/` has the systemd unit and nftables rules for it.
 
+In Docker (Docker Desktop and OrbStack included — containers are always Linux),
+start from `test-infra/docker-compose.yml`: it needs `cap_add: [NET_ADMIN]`, a
+players network without masquerading, and a return-path sidecar per backend.
+`test-infra/tproxy-check/run.sh` checks that the setup works.
+
 Check a config without starting anything:
 
 ```bash

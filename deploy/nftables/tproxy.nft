@@ -1,31 +1,20 @@
 #!/usr/sbin/nft -f
 #
-# Return path for transparent backend connections.
-#
-# On Linux the gateway always opens backend connections using the *player's*
-# source address. The backend therefore replies to the player's IP, and those
-# replies have to find their way back into the gateway's socket instead of being
-# routed out to the internet.
-#
-# This file handles the gateway side. See docs/forwarding.md for the routing
-# rule and the backend side, both of which are required as well.
+# Gateway side of the TPROXY return path. Loaded by tproxy-setup.sh, which also
+# adds the routing rule these marks depend on.
+
+# Declared and flushed first, so loading this twice does not duplicate rules.
+table inet mcgateway
+flush table inet mcgateway
 
 table inet mcgateway {
     chain divert {
         type filter hook prerouting priority mangle; policy accept;
 
-        # `socket transparent 1` matches packets that already belong to an open
-        # transparent socket — exactly the backend replies addressed to a player
-        # IP. Marking them sends them to the local lookup table set up by
-        # tproxy-setup.sh, which delivers them to this process.
+        # `socket transparent 1` matches packets that belong to an open
+        # transparent socket — exactly the backend replies addressed to a
+        # player's IP. The mark sends them to the local lookup table, which
+        # delivers them to this process instead of routing them away.
         meta l4proto tcp socket transparent 1 meta mark set 1 accept
-    }
-
-    chain input {
-        type filter hook input priority filter; policy accept;
-
-        # The public listener. Everything else about the gateway host should be
-        # closed off separately.
-        tcp dport 25565 accept
     }
 }

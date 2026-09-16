@@ -1,70 +1,112 @@
 # A network to test the gateway against real server software.
 #
-# Only the gateway publishes a port. The backends sit on an internal network,
-# exactly as they should in production — which also means this compose file
-# fails loudly if the gateway ever stops being the only way in.
+#   docker compose up -d --build
+#   # then point a Minecraft client at localhost:25565
 #
-#   docker compose up -d
-#   # then point a client at localhost:25565
+# Only the gateway publishes a port. Players reach the backends through it and
+# nothing else — no backend has a port of its own.
 #
-# ON LINUX, READ THIS FIRST
-# -------------------------
-# The gateway connects to backends transparently (TPROXY), which needs
-# CAP_NET_ADMIN *and* a return path: the backend replies to the player's own IP,
-# and those packets have to come back to the gateway. A default docker bridge
-# network does not do that, so sessions will hang.
+# Transparent forwarding in Docker
+# --------------------------------
+# Containers are Linux on every host (Docker Desktop and OrbStack on macOS
+# included), so the gateway always connects to backends transparently and every
+# backend sees the player's address. Three things in this file make that work,
+# and removing any one of them makes sessions hang:
 #
-# Either give this network the host setup from deploy/nftables/ and make the
-# gateway container the backends' default route, or run this compose file on
-# macOS/Windows (Docker Desktop), where the gateway connects normally.
+# 1. `cap_add: [NET_ADMIN]` on the gateway. Its entrypoint sets up the return
+#    path, then drops to an unprivileged user that keeps only this capability.
+#
+# 2. The `players` network has masquerading switched off. Docker otherwise
+#    rewrites any packet with a source from that subnet leaving via another
+#    bridge — which is exactly what a transparent connection looks like — and
+#    the backend would see a bridge address instead of the player.
+#
+#    It also has to be the gateway's first interface, which Docker orders by
+#    network name: `players` sorts before `servers`. Desktop port forwarders
+#    connect to that first address, so from the host you will see the players
+#    bridge address (e.g. 192.168.x.1) rather than your LAN IP. A container on
+#    the `players` network, or a real remote client, shows its own address.
+#
+# 3. A `*-return-path` sidecar in each backend's network namespace. It sends
+#    replies to gateway-opened connections back via the gateway, and leaves the
+#    backend's own traffic (downloading the server jar, for instance) alone.
+#    A sidecar shares its backend's namespace, so recreate both together:
+#      docker compose up -d --force-recreate paper paper-return-path
+#
+# test-infra/tproxy-check/ runs the same setup against a tiny echo backend and
+# asserts what address the backend saw.
 
 name: mc-gateway-test
+
+x-return-path: &return-path
+  build:
+    context: ..
+    dockerfile: test-infra/return-path/Dockerfile
+  image: mc-gateway-return-path:dev
+  cap_add: [NET_ADMIN]
+  environment:
+    GATEWAY_IP: 10.77.0.2
+    LOCAL_SUBNET: 10.77.0.0/24
+  restart: unless-stopped
+
+x-minecraft: &minecraft
+  image: itzg/minecraft-server:latest
+  networks: [servers]
+  restart: unless-stopped
 
 services:
   gateway:
     build:
       context: ..
       dockerfile: Dockerfile
+    image: mc-gateway:dev
     ports:
       - "25565:25565"
       - "127.0.0.1:9100:9100"
     volumes:
       - ./gateway/config.yaml:/etc/mc-gateway/config.yaml:ro
-    # Required on Linux: without it the gateway refuses to start, because it
-    # cannot create transparent sockets.
     cap_add: [NET_ADMIN]
-    networks: [edge, backend]
-    depends_on: [vanilla, paper, velocity]
+    networks:
+      players:
+        gw_priority: 1
+      servers:
+        ipv4_address: 10.77.0.2
     restart: unless-stopped
 
-  # Vanilla needs no proxy support of any kind: it is reached either
-  # transparently or directly, and sees plain Minecraft bytes either way.
+  # Vanilla needs no proxy support of any kind.
   vanilla:
-    image: itzg/minecraft-server:latest
+    <<: *minecraft
     environment:
       EULA: "TRUE"
       TYPE: VANILLA
       VERSION: "1.21.1"
       ONLINE_MODE: "FALSE"
       MEMORY: 1G
-    networks: [backend]
     volumes: [vanilla-data:/data]
+  vanilla-return-path:
+    <<: *return-path
+    network_mode: "service:vanilla"
+    depends_on: [vanilla]
 
-  # Paper also needs nothing configured. Leave `proxy-protocol` off in
+  # Paper needs nothing configured either. Leave `proxy-protocol` off in
   # spigot.yml: the gateway sends no header.
   paper:
-    image: itzg/minecraft-server:latest
+    <<: *minecraft
     environment:
       EULA: "TRUE"
       TYPE: PAPER
       VERSION: "1.21.1"
       ONLINE_MODE: "FALSE"
       MEMORY: 1G
-    networks: [backend]
     volumes: [paper-data:/data]
+  paper-return-path:
+    <<: *return-path
+    network_mode: "service:paper"
+    depends_on: [paper]
 
-  # Velocity behind the gateway: a proxy behind a proxy. Velocity keeps doing
-  # its own authentication and its own forwarding to the servers behind it.
+  # Velocity behind the gateway: a proxy behind a proxy. It keeps doing its own
+  # authentication and its own forwarding to the servers behind it. Its hop to
+  # Paper stays inside the `servers` subnet, so the return path leaves it alone.
   velocity:
     image: itzg/bungeecord:latest
     environment:
@@ -72,36 +114,63 @@ services:
     volumes:
       - ./velocity/velocity.toml:/server/velocity.toml:ro
       - velocity-data:/server
-    networks: [backend]
+    networks: [servers]
+    restart: unless-stopped
+  velocity-return-path:
+    <<: *return-path
+    network_mode: "service:velocity"
+    depends_on: [velocity]
 
   fabric:
-    image: itzg/minecraft-server:latest
+    <<: *minecraft
     environment:
       EULA: "TRUE"
       TYPE: FABRIC
       VERSION: "1.21.1"
       ONLINE_MODE: "FALSE"
       MEMORY: 1G
-    networks: [backend]
     volumes: [fabric-data:/data]
+    profiles: [modded]
+  fabric-return-path:
+    <<: *return-path
+    network_mode: "service:fabric"
+    depends_on: [fabric]
     profiles: [modded]
 
   neoforge:
-    image: itzg/minecraft-server:latest
+    <<: *minecraft
     environment:
       EULA: "TRUE"
       TYPE: NEOFORGE
       VERSION: "1.21.1"
       ONLINE_MODE: "FALSE"
       MEMORY: 2G
-    networks: [backend]
     volumes: [neoforge-data:/data]
+    profiles: [modded]
+  neoforge-return-path:
+    <<: *return-path
+    network_mode: "service:neoforge"
+    depends_on: [neoforge]
     profiles: [modded]
 
 networks:
-  edge:
-  backend:
-    internal: true
+  # Where players arrive. No masquerading — see the header.
+  players:
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"
+
+  # Where the backends live. Not `internal`: the server images download their
+  # jars on first start. Nothing here publishes a port, so players still cannot
+  # reach a backend except through the gateway.
+  #
+  # Docker hands out dynamic addresses from the start of a subnet, which would
+  # race the gateway's fixed 10.77.0.2 whenever a backend starts first. Dynamic
+  # addresses therefore come from the upper half only.
+  servers:
+    ipam:
+      config:
+        - subnet: 10.77.0.0/24
+          ip_range: 10.77.0.128/25
 
 volumes:
   vanilla-data:

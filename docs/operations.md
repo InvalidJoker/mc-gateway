@@ -18,6 +18,12 @@ transparent. `deploy/systemd/mc-gateway.service` runs it as an unprivileged user
 with that one capability and a tight sandbox. See
 [forwarding](forwarding.md) for the routing setup that has to accompany it.
 
+The container image does the same: run it with `cap_add: [NET_ADMIN]` and its
+entrypoint sets up the return path, then drops to an unprivileged user keeping
+only that capability. Set `MC_GATEWAY_TPROXY_SETUP=0` if the return path is
+configured outside the container. [Forwarding → In Docker](forwarding.md#in-docker)
+lists the network settings a compose file needs.
+
 ## Reloading
 
 ```bash

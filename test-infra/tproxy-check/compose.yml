@@ -1,0 +1,43 @@
+# The transparent-forwarding setup from ../docker-compose.yml, with an echo
+# backend that reports the address it accepted a connection from. run.sh drives
+# it; see ../docker-compose.yml for why each piece is there.
+name: mc-gateway-tproxy-check
+
+services:
+  gateway:
+    build: { context: ../.., dockerfile: Dockerfile }
+    image: mc-gateway:dev
+    cap_add: [NET_ADMIN]
+    volumes: ["./gateway.yaml:/etc/mc-gateway/config.yaml:ro"]
+    ports: ["127.0.0.1:25700:25565"]
+    networks:
+      players: { gw_priority: 1 }
+      servers: { ipv4_address: 10.77.0.2 }
+
+  echo:
+    image: python:3-alpine
+    command: ["python", "-u", "/backend.py"]
+    volumes: ["./backend.py:/backend.py:ro"]
+    networks:
+      servers: { ipv4_address: 10.77.0.10 }
+
+  echo-return-path:
+    build: { context: ../.., dockerfile: test-infra/return-path/Dockerfile }
+    image: mc-gateway-return-path:dev
+    network_mode: "service:echo"
+    cap_add: [NET_ADMIN]
+    environment: { GATEWAY_IP: 10.77.0.2, LOCAL_SUBNET: 10.77.0.0/24 }
+    depends_on: [echo]
+
+  client:
+    image: python:3-alpine
+    command: ["sleep", "infinity"]
+    volumes: ["./client.py:/client.py:ro"]
+    networks: [players]
+
+networks:
+  players:
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"
+  servers:
+    ipam: { config: [{ subnet: 10.77.0.0/24, ip_range: 10.77.0.128/25 }] }
