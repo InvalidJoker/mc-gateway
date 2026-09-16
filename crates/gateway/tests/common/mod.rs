@@ -66,7 +66,23 @@ impl FakeBackend {
                     let mut head = vec![0u8; 8192];
                     let Ok(read) = stream.read(&mut head).await else { return };
                     head.truncate(read);
-                    log.lock().expect("backend log").push(Received { peer, head });
+                    log.lock().expect("backend log").push(Received { peer, head: head.clone() });
+
+                    // Like a real server, only answer a status request once one
+                    // has actually arrived: handshake first, then the request.
+                    if let Behaviour::Status(_) = behaviour {
+                        let mut buf = head;
+                        loop {
+                            if has_status_request(&buf) {
+                                break;
+                            }
+                            let mut chunk = [0u8; 4096];
+                            match stream.read(&mut chunk).await {
+                                Ok(0) | Err(_) => return,
+                                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                            }
+                        }
+                    }
 
                     match behaviour {
                         Behaviour::Status(json) => {
@@ -151,6 +167,13 @@ impl FakeBackend {
         }
         panic!("expected {count} connections, saw {}", self.connection_count());
     }
+}
+
+/// True once `buf` holds a handshake followed by a complete status request.
+fn has_status_request(buf: &[u8]) -> bool {
+    let Ok(handshake) = mc_protocol::frame::decode_frame(buf) else { return false };
+    let rest = &buf[handshake.total_len..];
+    matches!(mc_protocol::frame::decode_frame(rest), Ok(frame) if frame.id == STATUS_REQUEST_ID)
 }
 
 /// A backend that answers status pings with a realistic Paper-shaped document.

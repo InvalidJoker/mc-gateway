@@ -154,11 +154,14 @@ async fn run(
             let Some(target) = runtime.registry.target(default) else {
                 return Outcome::Dropped("legacy ping with no default route");
             };
-            return match target.select() {
-                Ok(backend) => {
-                    proxy(stream, buf, &backend, config, client, "legacy", None).await
+            let Ok(backend) = target.select() else {
+                return Outcome::Dropped("no backend for the legacy ping");
+            };
+            return match connect_backend(&backend, config, client).await {
+                Ok(upstream) => {
+                    proxy(stream, upstream, buf, &backend, config, "legacy", None).await
                 }
-                Err(_) => Outcome::Dropped("no backend for the legacy ping"),
+                Err(reason) => Outcome::Dropped(reason),
             };
         }
         Err(outcome) => return outcome,
@@ -208,7 +211,38 @@ async fn serve_status(
     };
 
     let rewrite = motd.rewrites_anything().then(|| motd.clone());
-    proxy(stream, buf, &backend, config, client, "status", rewrite).await
+
+    if rewrite.is_some() {
+        // Rewriting means waiting for the backend's answer before piping. The
+        // backend only answers once it has the status request, and a real
+        // client sends that as a separate write after the handshake — so it has
+        // to be in the replay buffer first, or both sides wait on each other
+        // until the status timeout.
+        loop {
+            match decode_frame(&buf[handshake_len..]) {
+                Ok(_) => break,
+                Err(err) if err.is_incomplete() => {}
+                Err(_) => return Outcome::Dropped("malformed status request"),
+            }
+            if !read_more(&mut stream, &mut buf, config.timeouts.status).await {
+                return Outcome::Dropped("no status request");
+            }
+        }
+    }
+
+    match connect_backend(&backend, config, client).await {
+        Ok(upstream) => proxy(stream, upstream, buf, &backend, config, "status", rewrite).await,
+        // Health checks said yes, the connection said no. The honest answer
+        // is still a status response, just the offline one.
+        Err(_) => {
+            buf.drain(..handshake_len);
+            let json = motd::offline_status(motd, handshake.protocol_version);
+            match answer_status(&mut stream, &mut buf, &json, config.timeouts.status).await {
+                Ok(()) => Outcome::Offline,
+                Err(reason) => Outcome::Dropped(reason),
+            }
+        }
+    }
 }
 
 /// Status request -> response, then the optional ping -> pong, answered here.
@@ -306,7 +340,15 @@ async fn serve_login(
         "routing player"
     );
 
-    let outcome = proxy(stream, buf, &backend, config, client, "session", None).await;
+    let upstream = match connect_backend(&backend, config, client).await {
+        Ok(upstream) => upstream,
+        Err(reason) => {
+            let _ = kick(&mut stream, &config.messages.backend_error).await;
+            return Outcome::Refused(reason);
+        }
+    };
+
+    let outcome = proxy(stream, upstream, buf, &backend, config, "session", None).await;
     drop(guard);
     outcome
 }
@@ -319,39 +361,44 @@ async fn serve_login(
 /// parsed, its description lines are replaced and it is re-encoded. Everything
 /// else about the response, and every other byte in either direction, is
 /// forwarded untouched.
-#[allow(clippy::too_many_arguments, reason = "one connection's full context")]
-async fn proxy(
-    mut stream: TcpStream,
-    replay: Vec<u8>,
+/// Resolves and connects to a backend, transparently on Linux.
+///
+/// Deliberately says nothing to the client on failure: what the client should
+/// hear depends on what it asked for. A player gets a disconnect reason, a
+/// server-list ping gets the offline MOTD — sending a login disconnect to a
+/// status ping is an unparseable response, and the client shows "Can't
+/// connect" instead of anything useful.
+async fn connect_backend(
     backend: &Arc<mc_routing::Backend>,
     config: &Arc<Config>,
     client: SocketAddr,
+) -> Result<TcpStream, &'static str> {
+    let address = mc_forwarding::resolve(&backend.address).await.map_err(|err| {
+        observe::backend_failed(&backend.name, err.kind());
+        warn!(backend = %backend.name, %err, "cannot resolve backend");
+        "backend_unresolved"
+    })?;
+
+    mc_forwarding::connect(address, Origin::Client(client), config.timeouts.connect)
+        .await
+        .map_err(|err| {
+            observe::backend_failed(&backend.name, err.kind());
+            warn!(backend = %backend.name, %address, error = %err, "backend connect failed");
+            "backend_error"
+        })
+}
+
+#[allow(clippy::too_many_arguments, reason = "one connection's full context")]
+async fn proxy(
+    mut stream: TcpStream,
+    mut upstream: TcpStream,
+    replay: Vec<u8>,
+    backend: &Arc<mc_routing::Backend>,
+    config: &Arc<Config>,
     kind: &'static str,
     rewrite: Option<Motd>,
 ) -> Outcome {
     let started = Instant::now();
-
-    let address = match mc_forwarding::resolve(&backend.address).await {
-        Ok(address) => address,
-        Err(err) => {
-            observe::backend_failed(&backend.name, err.kind());
-            warn!(backend = %backend.name, %err, "cannot resolve backend");
-            let _ = kick(&mut stream, &config.messages.backend_error).await;
-            return Outcome::Refused("backend_unresolved");
-        }
-    };
-
-    let mut upstream =
-        match mc_forwarding::connect(address, Origin::Client(client), config.timeouts.connect).await
-        {
-            Ok(upstream) => upstream,
-            Err(err) => {
-                observe::backend_failed(&backend.name, err.kind());
-                warn!(backend = %backend.name, %address, error = %err, "backend connect failed");
-                let _ = kick(&mut stream, &config.messages.backend_error).await;
-                return Outcome::Refused("backend_error");
-            }
-        };
 
     observe::backend_connected(&backend.name);
     observe::session_started(&backend.name);
@@ -364,7 +411,9 @@ async fn proxy(
     {
         observe::backend_failed(&backend.name, "io");
         warn!(backend = %backend.name, %err, "replaying the handshake failed");
-        let _ = kick(&mut stream, &config.messages.backend_error).await;
+        if kind == "session" {
+            let _ = kick(&mut stream, &config.messages.backend_error).await;
+        }
         observe::session_ended(&backend.name, None);
         return Outcome::Refused("backend_error");
     }

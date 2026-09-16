@@ -30,8 +30,9 @@
 # 3. A `*-return-path` sidecar in each backend's network namespace. It sends
 #    replies to gateway-opened connections back via the gateway, and leaves the
 #    backend's own traffic (downloading the server jar, for instance) alone.
-#    A sidecar shares its backend's namespace, so recreate both together:
-#      docker compose up -d --force-recreate paper paper-return-path
+#    A sidecar lives in its backend's namespace, which is replaced whenever the
+#    backend container is recreated; `restart: true` on its dependency makes
+#    Compose bring the sidecar along.
 #
 # test-infra/tproxy-check/ runs the same setup against a tiny echo backend and
 # asserts what address the backend saw.
@@ -86,7 +87,8 @@ services:
   vanilla-return-path:
     <<: *return-path
     network_mode: "service:vanilla"
-    depends_on: [vanilla]
+    depends_on:
+      vanilla: { condition: service_started, restart: true }
 
   # Paper needs nothing configured either. Leave `proxy-protocol` off in
   # spigot.yml: the gateway sends no header.
@@ -102,7 +104,8 @@ services:
   paper-return-path:
     <<: *return-path
     network_mode: "service:paper"
-    depends_on: [paper]
+    depends_on:
+      paper: { condition: service_started, restart: true }
 
   # Velocity behind the gateway: a proxy behind a proxy. It keeps doing its own
   # authentication and its own forwarding to the servers behind it. Its hop to
@@ -111,15 +114,19 @@ services:
     image: itzg/bungeecord:latest
     environment:
       TYPE: VELOCITY
+    # Velocity runs with its own generated defaults: current builds rewrite any
+    # config file in an older format anyway. Those defaults already have
+    # `haproxy-protocol` off, which is what the gateway needs. To actually join
+    # through it, edit [servers] in the velocity-data volume.
     volumes:
-      - ./velocity/velocity.toml:/server/velocity.toml:ro
       - velocity-data:/server
     networks: [servers]
     restart: unless-stopped
   velocity-return-path:
     <<: *return-path
     network_mode: "service:velocity"
-    depends_on: [velocity]
+    depends_on:
+      velocity: { condition: service_started, restart: true }
 
   fabric:
     <<: *minecraft
@@ -134,7 +141,8 @@ services:
   fabric-return-path:
     <<: *return-path
     network_mode: "service:fabric"
-    depends_on: [fabric]
+    depends_on:
+      fabric: { condition: service_started, restart: true }
     profiles: [modded]
 
   neoforge:
@@ -150,7 +158,8 @@ services:
   neoforge-return-path:
     <<: *return-path
     network_mode: "service:neoforge"
-    depends_on: [neoforge]
+    depends_on:
+      neoforge: { condition: service_started, restart: true }
     profiles: [modded]
 
 networks:

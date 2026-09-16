@@ -270,3 +270,79 @@ async fn pre_1_7_pings_are_forwarded_to_the_default_target() {
 
     server.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_client_that_sends_the_request_separately_still_gets_the_motd() {
+    // The real Minecraft client flushes the handshake and the status request
+    // as two separate writes. The gateway must not start waiting for the
+    // backend's answer before the backend has even been asked.
+    let backend = FakeBackend::start(Behaviour::Status(paper_status("Backend MOTD", 3))).await;
+    let server = gateway(&config(&backend.address.to_string(), REWRITE_SECOND)).await;
+    let address = server.address("public").unwrap();
+
+    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    stream
+        .write_all(&common::handshake(767, "survival.example.net", 25565, mc_protocol::NextState::Status))
+        .await
+        .unwrap();
+    stream.flush().await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    stream.write_all(&mc_protocol::encode_packet(0x00, &[])).await.unwrap();
+
+    let (id, body) = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        common::read_packet(&mut stream),
+    )
+    .await
+    .expect("a status response within 3s, not a stall until the status timeout")
+    .expect("a status response");
+    assert_eq!(id, 0x00);
+
+    let json: serde_json::Value =
+        serde_json::from_str(&mc_protocol::Reader::new(&body).string(262_144).unwrap()).unwrap();
+    assert_eq!(json["description"]["text"], "Backend MOTD\n\u{a7}7survival \u{a7}8• \u{a7}7creative");
+    assert_eq!(json["players"]["online"], 3);
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_unreachable_backend_still_answers_the_server_list() {
+    // Health checks disabled, so the backend counts as up — but nothing
+    // listens there. The ping must get the offline MOTD, not a login
+    // disconnect that the server list cannot parse.
+    let dead = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let yaml = format!(
+        r#"
+listeners:
+  - name: public
+    bind: "127.0.0.1:0"
+routing:
+  default: dead
+servers:
+  dead:
+    address: "{dead}"
+motd:
+  line2: "&7via the gateway"
+  offline:
+    text: "&cbackend offline"
+timeouts:
+  connect: 500ms
+  drain: 200ms
+health:
+  enabled: false
+"#
+    );
+    let server = gateway(&yaml).await;
+    let address = server.address("public").unwrap();
+
+    let status = status_ping(address, "anything.example.net", 767).await;
+    assert_eq!(status["description"]["text"], "\u{a7}cbackend offline");
+    assert!(status.get("version").is_some(), "a complete status document");
+
+    server.shutdown().await;
+}

@@ -26,7 +26,7 @@ servers:
     address: "paper:25565"
     kind: paper
   velocity:
-    address: "velocity:25577"
+    address: "velocity:25565"
     kind: velocity
   fabric:
     address: "fabric:25565"
