@@ -5,7 +5,7 @@ routing:
   default: echo
 servers:
   echo:
-    address: "10.77.0.10:25565"
+    address: "10.78.0.10:25565"
 limits:
   max_connections_per_ip: 0
 health:

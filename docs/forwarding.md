@@ -105,7 +105,7 @@ are needed, and each one's absence makes sessions hang:
 | `cap_add: [NET_ADMIN]` on the gateway | The image's entrypoint sets up the gateway side of the return path, then drops to an unprivileged user that keeps this one capability as an ambient capability. A `USER` line cannot do that: a non-root user gets no effective capabilities from `cap_add`. |
 | masquerading off on the network players arrive on | Docker masquerades any packet from a network's subnet that leaves via another bridge. A transparent connection is exactly that, so the backend would see a bridge address. `com.docker.network.bridge.enable_ip_masquerade: "false"`. |
 | that network is the gateway's first interface | Docker orders interfaces by network name, and desktop port forwarders connect to the first one. If it is the backend network, host traffic arrives from an address inside the backend subnet, which cannot be told apart from a real neighbour. |
-| a return-path sidecar per backend | `network_mode: service:<backend>` running `backend-return-path.sh`. |
+| a return path per backend | A small container runs `backend-return-path.sh` and owns the network namespace; the Minecraft server joins it with `network_mode: service:<name>-net`. It has to be this way round: a sidecar joining the *server's* namespace loses its rules every time the server container is recreated. |
 
 Also keep the gateway's fixed address out of Docker's dynamic pool
 (`ip_range`), or a backend that starts first can take it.

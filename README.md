@@ -69,7 +69,7 @@ The return path also has to be set up — see [forwarding](docs/forwarding.md).
 
 In Docker (Docker Desktop and OrbStack included — containers are always Linux),
 start from `test-infra/docker-compose.yml`: it needs `cap_add: [NET_ADMIN]`, a
-players network without masquerading, and a return-path sidecar per backend.
+players network without masquerading, and a return path per backend.
 `test-infra/tproxy-check/run.sh` checks that the setup works.
 
 Check a config without starting anything:

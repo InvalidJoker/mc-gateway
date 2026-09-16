@@ -12,22 +12,24 @@ services:
     ports: ["127.0.0.1:25700:25565"]
     networks:
       players: { gw_priority: 1 }
-      servers: { ipv4_address: 10.77.0.2 }
+      servers: { ipv4_address: 10.78.0.2 }
+
+  # Owns the backend's network namespace and installs its return path; the
+  # echo server joins it (see ../docker-compose.yml).
+  echo-net:
+    build: { context: ../.., dockerfile: test-infra/return-path/Dockerfile }
+    image: mc-gateway-return-path:dev
+    cap_add: [NET_ADMIN]
+    environment: { GATEWAY_IP: 10.78.0.2, LOCAL_SUBNET: 10.78.0.0/24 }
+    networks:
+      servers: { ipv4_address: 10.78.0.10 }
 
   echo:
     image: python:3-alpine
     command: ["python", "-u", "/backend.py"]
     volumes: ["./backend.py:/backend.py:ro"]
-    networks:
-      servers: { ipv4_address: 10.77.0.10 }
-
-  echo-return-path:
-    build: { context: ../.., dockerfile: test-infra/return-path/Dockerfile }
-    image: mc-gateway-return-path:dev
-    network_mode: "service:echo"
-    cap_add: [NET_ADMIN]
-    environment: { GATEWAY_IP: 10.77.0.2, LOCAL_SUBNET: 10.77.0.0/24 }
-    depends_on: [echo]
+    network_mode: "service:echo-net"
+    depends_on: [echo-net]
 
   client:
     image: python:3-alpine
@@ -40,4 +42,4 @@ networks:
     driver_opts:
       com.docker.network.bridge.enable_ip_masquerade: "false"
   servers:
-    ipam: { config: [{ subnet: 10.77.0.0/24, ip_range: 10.77.0.128/25 }] }
+    ipam: { config: [{ subnet: 10.78.0.0/24, ip_range: 10.78.0.128/25 }] }

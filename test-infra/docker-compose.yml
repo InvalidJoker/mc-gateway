@@ -27,19 +27,23 @@
 #    bridge address (e.g. 192.168.x.1) rather than your LAN IP. A container on
 #    the `players` network, or a real remote client, shows its own address.
 #
-# 3. A `*-return-path` sidecar in each backend's network namespace. It sends
-#    replies to gateway-opened connections back via the gateway, and leaves the
-#    backend's own traffic (downloading the server jar, for instance) alone.
-#    A sidecar lives in its backend's namespace, which is replaced whenever the
-#    backend container is recreated; `restart: true` on its dependency makes
-#    Compose bring the sidecar along.
+# 3. Each backend runs inside the network namespace of a small `*-net`
+#    container, which sets up the return path: replies to gateway-opened
+#    connections go back via the gateway, while the backend's own traffic
+#    (downloading the server jar, for instance) keeps its normal route.
+#
+#    The `*-net` container owns the namespace, like a pod. Recreating the
+#    Minecraft server therefore keeps the rules; the other way round — a
+#    sidecar joining the server's namespace — loses them on every recreate.
+#    The `*-net` container also carries the backend's hostname on the network.
 #
 # test-infra/tproxy-check/ runs the same setup against a tiny echo backend and
 # asserts what address the backend saw.
 
 name: mc-gateway-test
 
-x-return-path: &return-path
+# Owns a backend's network namespace and installs its return path.
+x-backend-net: &backend-net
   build:
     context: ..
     dockerfile: test-infra/return-path/Dockerfile
@@ -52,7 +56,6 @@ x-return-path: &return-path
 
 x-minecraft: &minecraft
   image: itzg/minecraft-server:latest
-  networks: [servers]
   restart: unless-stopped
 
 services:
@@ -75,8 +78,13 @@ services:
     restart: unless-stopped
 
   # Vanilla needs no proxy support of any kind.
+  vanilla-net:
+    <<: *backend-net
+    networks: { servers: { aliases: [vanilla] } }
   vanilla:
     <<: *minecraft
+    network_mode: "service:vanilla-net"
+    depends_on: [vanilla-net]
     environment:
       EULA: "TRUE"
       TYPE: VANILLA
@@ -84,16 +92,16 @@ services:
       ONLINE_MODE: "FALSE"
       MEMORY: 1G
     volumes: [vanilla-data:/data]
-  vanilla-return-path:
-    <<: *return-path
-    network_mode: "service:vanilla"
-    depends_on:
-      vanilla: { condition: service_started, restart: true }
 
   # Paper needs nothing configured either. Leave `proxy-protocol` off in
   # spigot.yml: the gateway sends no header.
+  paper-net:
+    <<: *backend-net
+    networks: { servers: { aliases: [paper] } }
   paper:
     <<: *minecraft
+    network_mode: "service:paper-net"
+    depends_on: [paper-net]
     environment:
       EULA: "TRUE"
       TYPE: PAPER
@@ -101,35 +109,35 @@ services:
       ONLINE_MODE: "FALSE"
       MEMORY: 1G
     volumes: [paper-data:/data]
-  paper-return-path:
-    <<: *return-path
-    network_mode: "service:paper"
-    depends_on:
-      paper: { condition: service_started, restart: true }
 
   # Velocity behind the gateway: a proxy behind a proxy. It keeps doing its own
   # authentication and its own forwarding to the servers behind it. Its hop to
   # Paper stays inside the `servers` subnet, so the return path leaves it alone.
+  #
+  # It runs with its own generated defaults: current builds rewrite any config
+  # file in an older format anyway. Those defaults already have
+  # `haproxy-protocol` off, which is what the gateway needs. To actually join
+  # through it, edit [servers] in the velocity-data volume.
+  velocity-net:
+    <<: *backend-net
+    networks: { servers: { aliases: [velocity] } }
   velocity:
     image: itzg/bungeecord:latest
+    network_mode: "service:velocity-net"
+    depends_on: [velocity-net]
     environment:
       TYPE: VELOCITY
-    # Velocity runs with its own generated defaults: current builds rewrite any
-    # config file in an older format anyway. Those defaults already have
-    # `haproxy-protocol` off, which is what the gateway needs. To actually join
-    # through it, edit [servers] in the velocity-data volume.
-    volumes:
-      - velocity-data:/server
-    networks: [servers]
+    volumes: [velocity-data:/server]
     restart: unless-stopped
-  velocity-return-path:
-    <<: *return-path
-    network_mode: "service:velocity"
-    depends_on:
-      velocity: { condition: service_started, restart: true }
 
+  fabric-net:
+    <<: *backend-net
+    networks: { servers: { aliases: [fabric] } }
+    profiles: [modded]
   fabric:
     <<: *minecraft
+    network_mode: "service:fabric-net"
+    depends_on: [fabric-net]
     environment:
       EULA: "TRUE"
       TYPE: FABRIC
@@ -138,15 +146,15 @@ services:
       MEMORY: 1G
     volumes: [fabric-data:/data]
     profiles: [modded]
-  fabric-return-path:
-    <<: *return-path
-    network_mode: "service:fabric"
-    depends_on:
-      fabric: { condition: service_started, restart: true }
-    profiles: [modded]
 
+  neoforge-net:
+    <<: *backend-net
+    networks: { servers: { aliases: [neoforge] } }
+    profiles: [modded]
   neoforge:
     <<: *minecraft
+    network_mode: "service:neoforge-net"
+    depends_on: [neoforge-net]
     environment:
       EULA: "TRUE"
       TYPE: NEOFORGE
@@ -154,12 +162,6 @@ services:
       ONLINE_MODE: "FALSE"
       MEMORY: 2G
     volumes: [neoforge-data:/data]
-    profiles: [modded]
-  neoforge-return-path:
-    <<: *return-path
-    network_mode: "service:neoforge"
-    depends_on:
-      neoforge: { condition: service_started, restart: true }
     profiles: [modded]
 
 networks:
