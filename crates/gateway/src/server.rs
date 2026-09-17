@@ -47,18 +47,32 @@ impl Server {
             bound.push((Arc::new(ListenerRuntime::from(listener)), socket, address));
         }
 
-        // Port interception: one transparent listener that the kernel hands
-        // every intercepted connection to.
-        let intercept_socket = match &loaded.config.intercept {
-            Some(intercept) => {
-                let socket = mc_forwarding::transparent::listen(intercept.listen, 4096).map_err(
-                    |err| format!("cannot start interception on {}: {err}", intercept.listen),
-                )?;
-                let address = socket.local_addr().map_err(|err| err.to_string())?;
-                Some((socket, address))
+        // Port interception: a transparent listener per address family that
+        // the kernel hands every intercepted connection to.
+        let mut intercept_sockets = Vec::new();
+        if let Some(intercept) = &loaded.config.intercept {
+            let socket = mc_forwarding::transparent::listen(intercept.listen, 4096).map_err(
+                |err| format!("cannot start interception on {}: {err}", intercept.listen),
+            )?;
+            let address = socket.local_addr().map_err(|err| err.to_string())?;
+            intercept_sockets.push(("intercept", socket, address));
+
+            if let Some(listen_v6) = intercept.listen_v6 {
+                // A host without IPv6 is not an error: its IPv6 rule is never
+                // installed, and IPv4 interception works on its own.
+                match mc_forwarding::transparent::listen(listen_v6, 4096) {
+                    Ok(socket) => {
+                        let address = socket.local_addr().map_err(|err| err.to_string())?;
+                        intercept_sockets.push(("intercept-v6", socket, address));
+                    }
+                    Err(err) => warn!(
+                        address = %listen_v6,
+                        %err,
+                        "IPv6 interception unavailable; IPv6 connections pass through untouched"
+                    ),
+                }
             }
-            None => None,
-        };
+        }
 
         let metrics_config = loaded.config.metrics.clone();
         let drain = loaded.config.timeouts.drain;
@@ -79,8 +93,8 @@ impl Server {
             )));
         }
 
-        if let Some((socket, address)) = intercept_socket {
-            addresses.push(("intercept".to_owned(), address));
+        for (name, socket, address) in intercept_sockets {
+            addresses.push((name.to_owned(), address));
             listeners.push(tokio::spawn(intercept::run(
                 socket,
                 Arc::clone(&app),

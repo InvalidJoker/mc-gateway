@@ -104,6 +104,10 @@ pub fn listen(address: SocketAddr, backlog: u32) -> io::Result<tokio::net::TcpLi
 
     let socket = transparent_socket(address.is_ipv4())?;
     socket.set_reuse_address(true)?;
+    if address.is_ipv6() {
+        // The IPv4 listener is a separate socket on the same port.
+        socket.set_only_v6(true)?;
+    }
     socket.set_nonblocking(true)?;
     socket.bind(&SockAddr::from(address))?;
     socket.listen(backlog as i32)?;

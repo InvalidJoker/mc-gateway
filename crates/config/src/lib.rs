@@ -112,6 +112,18 @@ impl Config {
         if !intercept.listen.is_ipv4() {
             errors.push("intercept.listen must be an IPv4 address".into());
         }
+        if let Some(listen_v6) = intercept.listen_v6 {
+            if !listen_v6.is_ipv6() {
+                errors.push("intercept.listen_v6 must be an IPv6 address".into());
+            }
+            if intercept.covers(listen_v6.port()) {
+                errors.push(format!(
+                    "intercept.listen_v6 port {} lies inside intercept.ports; connections would \
+                     be handed back to the gateway in a loop",
+                    listen_v6.port()
+                ));
+            }
+        }
         for listener in &self.listeners {
             if intercept.covers(listener.bind.port()) {
                 errors.push(format!(
@@ -526,6 +538,13 @@ motd:
         let raw = INTERCEPT_ONLY.replace("intercept:\n", "intercept:\n  listen: \"127.0.0.1:30500\"\n");
         let err = load(&raw).unwrap_err();
         assert!(err.to_string().contains("in a loop"), "{err}");
+    }
+
+    #[test]
+    fn rejects_listeners_of_the_wrong_family() {
+        let raw = INTERCEPT_ONLY.replace("intercept:\n", "intercept:\n  listen_v6: \"127.0.0.1:25501\"\n");
+        let err = load(&raw).unwrap_err();
+        assert!(err.to_string().contains("listen_v6 must be an IPv6 address"), "{err}");
     }
 
     #[test]

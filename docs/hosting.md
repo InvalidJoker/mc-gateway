@@ -29,6 +29,7 @@ The configuration is short:
 ```yaml
 intercept:
   listen: "127.0.0.1:25500"
+  listen_v6: "[::1]:25500"      # null turns IPv6 interception off
   ports: ["25565-25665"]        # your panel's allocation range
 
 motd:
@@ -74,7 +75,6 @@ iptables-legacy, use systemd instead.
 | anything that is not Minecraft (RCON, HTTP, a query tool…) | piped through |
 | a server that speaks first (SSH, FTP…) | piped through the moment it speaks |
 | a port outside `intercept.ports` | never reaches the gateway |
-| IPv6 | never reaches the gateway |
 
 The decision is made on the first bytes. As soon as they cannot be a status ping,
 or the client says nothing within `timeouts.handshake`, the connection is
@@ -82,20 +82,36 @@ passed through. Every error while looking at a status response forwards the
 server's original bytes. The worst case for a customer is a ping without your
 line — never a broken connection.
 
-A customer's server sees the player's real IP address, on a different source
-port than the player used.
+IPv4 and IPv6 are handled the same way.
+
+## What the customer's server sees
+
+Exactly the player address it would see without the gateway — only the source
+port differs. How that address looks depends on how Docker delivers the
+connection, and the gateway changes none of it:
+
+| server | IPv4 player | IPv6 player |
+|---|---|---|
+| container on an IPv4-only network (Docker's default) | player's IP | Docker's bridge address, e.g. `172.17.0.1` |
+| container on a network with IPv6 enabled | player's IP | player's IPv6 |
+| plain process on the node | player's IP | player's IPv6 |
+
+The bridge address in the first row is Docker's doing, not the gateway's: with
+no IPv6 address on the container, Docker hands IPv6 connections to
+`docker-proxy`, which reconnects over IPv4. Enabling IPv6 on the customers'
+Docker network gives them real IPv6 addresses, with or without the gateway.
 
 ## Failure behaviour
 
 All of these are checked by `test-infra/intercept-check/run.sh` against a real
-Docker node:
+Docker node, over IPv4 and IPv6, for all three kinds of server above:
 
 | situation | result |
 |---|---|
 | gateway running | ad on status pings, everything else untouched |
 | gateway stopped or crashed, rules still installed | **fail-open**: traffic goes straight to the servers, without the ad |
 | customer's server stopped | the connection is closed, as a closed port would be |
-| host firewall dropping INPUT (ufw) | works — see below |
+| host firewall dropping INPUT on IPv4 and IPv6 (ufw) | works — see below |
 | gateway restarted | rules are replaced, not duplicated |
 | teardown | rules removed, traffic untouched |
 
@@ -110,14 +126,15 @@ that drops there, such as ufw's default policy, would silently stop every
 intercepted connection. Opening the port range does not help: after Docker's
 DNAT the packet carries the container's internal port.
 
-The setup therefore inserts one rule into `INPUT` that accepts packets carrying
-the gateway's own mark, and the teardown removes it again:
+The setup therefore inserts one rule into `INPUT` — with both `iptables` and
+`ip6tables` — that accepts packets carrying the gateway's own mark, and the
+teardown removes them again:
 
 ```text
 -A INPUT -m mark --mark 0x6d67 -j ACCEPT
 ```
 
-That has been tested with an iptables `INPUT DROP` policy. firewalld keeps its
+That has been tested with an `INPUT DROP` policy on both families. firewalld keeps its
 rules in its own nftables table, where this rule has no effect; the requirement
 is the same — accept fwmark `0x6d67` in input — but it has to be added through
 firewalld, and that has not been tested.
@@ -146,10 +163,10 @@ installed, without installing anything.
 
 ## Limitations
 
-- IPv4 only. IPv6 connections are not intercepted and get no ad.
 - A stopped server's port accepts the connection and then closes it, instead of
   refusing it outright. The server list shows it as unreachable either way.
 - The same line goes to every server on the node. There is no per-customer
   exemption (for example, a paid tier without the ad) yet.
 - Tested with Docker containers with published ports, which is what Pterodactyl
-  and Pelican Wings create — not yet on a production node running Wings itself.
+  and Pelican Wings create, and with plain processes — not yet on a production
+  node running Wings itself.

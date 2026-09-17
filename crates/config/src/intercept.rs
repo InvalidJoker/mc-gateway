@@ -17,12 +17,20 @@ pub struct Intercept {
     /// and it keeps the port unreachable from outside.
     #[serde(default = "default_listen")]
     pub listen: SocketAddr,
+    /// The same for IPv6 connections. `null` turns IPv6 interception off; IPv6
+    /// traffic then passes through without the MOTD line.
+    #[serde(default = "default_listen_v6")]
+    pub listen_v6: Option<SocketAddr>,
     /// Ports whose connections are taken over, e.g. `["25565-25665", 30000]`.
     pub ports: Vec<PortRange>,
 }
 
 fn default_listen() -> SocketAddr {
     "127.0.0.1:25500".parse().expect("valid default")
+}
+
+fn default_listen_v6() -> Option<SocketAddr> {
+    Some("[::1]:25500".parse().expect("valid default"))
 }
 
 impl Intercept {
@@ -147,6 +155,11 @@ mod tests {
         assert!(intercept.covers(30000));
         assert!(!intercept.covers(30001));
         assert_eq!(intercept.listen, default_listen());
+        assert_eq!(intercept.listen_v6, default_listen_v6(), "IPv6 is on by default");
+
+        let v4_only: Intercept =
+            serde_yaml_ng::from_str("ports: [30000]\nlisten_v6: null").unwrap();
+        assert_eq!(v4_only.listen_v6, None);
     }
 
     #[test]

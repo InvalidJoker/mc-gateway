@@ -64,6 +64,7 @@ fn main() -> ExitCode {
         let interception = loaded.config.intercept.as_ref().map(|intercept| {
             mc_forwarding::netsetup::Interception {
                 listen: intercept.listen,
+                listen_v6: intercept.listen_v6,
                 ports: intercept.ports.iter().map(|range| (range.start, range.end)).collect(),
             }
         });

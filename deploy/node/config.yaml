@@ -5,6 +5,9 @@ intercept:
   # Where the kernel hands intercepted connections over. Keep it on loopback and
   # outside the port range below.
   listen: "127.0.0.1:25500"
+  # The same for IPv6. Set to null to leave IPv6 connections alone; on a host
+  # without IPv6 the gateway notices and carries on with IPv4.
+  listen_v6: "[::1]:25500"
   # The ports your panel allocates to customer servers.
   ports: ["25565-25665"]
 

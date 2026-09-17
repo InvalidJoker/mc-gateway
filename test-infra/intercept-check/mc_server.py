@@ -3,6 +3,7 @@
 # with its own MOTD, echoes the latency ping, and logs who it thinks connected.
 import json, socket, sys, threading
 NAME = sys.argv[1]
+PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 25565
 def varint(v):
     out = b""
     while True:
@@ -21,6 +22,7 @@ def frame(buf):
     if length is None or len(buf) < pos + length: return None
     return buf[pos:pos + length], pos + length
 def handle(c, peer):
+    peer = (peer[0].removeprefix("::ffff:"), peer[1])
     buf = b""
     try:
         while True:
@@ -54,7 +56,9 @@ def handle(c, peer):
             c.sendall(f"LOGIN-SEEN-FROM {peer[0]}".encode())
     finally:
         c.close()
-s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-s.bind(("0.0.0.0", 25565)); s.listen(64)
+# Dual-stack, so a container with an IPv6 address answers on both families.
+s = socket.socket(socket.AF_INET6); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+s.bind(("::", PORT)); s.listen(64)
 while True:
     c, p = s.accept(); threading.Thread(target=handle, args=(c, p), daemon=True).start()

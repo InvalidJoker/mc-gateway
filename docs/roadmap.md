@@ -22,7 +22,7 @@ What exists today, and what does not.
 | Graceful drain on shutdown | ✓ |
 | systemd unit, nftables rules, docker compose test network | ✓ |
 
-| Port-range interception for hosting nodes, fail-open, with automatic INPUT firewall rule | ✓ verified on a Docker node (docker-in-docker) |
+| Port-range interception for hosting nodes, IPv4 and IPv6, fail-open, with automatic INPUT firewall rules | ✓ verified on a Docker node (docker-in-docker) |
 
 ## Not built
 
@@ -31,10 +31,6 @@ What exists today, and what does not.
 Every server on a node gets the same line. A paid tier without the ad, or a
 different line per customer, needs a per-port override — a short list in the
 config, reloadable with `SIGHUP`, that a panel can write.
-
-### IPv6 interception
-
-Only IPv4 connections are intercepted today; IPv6 passes through without the ad.
 
 ### Verified compatibility matrix
 
