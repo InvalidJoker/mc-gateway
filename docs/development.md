@@ -1,148 +1,170 @@
-# Entwicklung
+# Development
 
-## Aufbau
+## Layout
 
-Ein einziges Rust-Paket:
+A single Rust package:
 
 ```text
 src/
-  main.rs         CLI: starten, --check, --print-network-setup/-teardown, Signale
-  server.rs       Listener starten, Config neu laden (SIGHUP), sauber stoppen
-  intercept.rs    eine abgefangene Verbindung: Status-Ping erkennen oder durchreichen
-  motd.rs         Zeile 1/2 in einer Status-Antwort ersetzen
-  chat.rs         Chat-Komponenten ⇄ §-Farbcodes
-  protocol.rs     VarInt, Pakete, Handshake — nur was vor dem Login nötig ist
-  transparent.rs  TPROXY-Sockets: Listener und Verbindung „als Spieler"
-  netsetup.rs     erzeugt die nftables-/Routing-/Firewall-Skripte aus der Config
-  config.rs       Config-Datei, Standardwerte, Validierung
-  observe.rs      Prometheus-Metriken
-tests/            Integrationstests für intercept.rs
-dev/              Dev-Lab und End-to-End-Test
-deploy/           Config-Vorlage, Docker-Entrypoint, compose, systemd
+  main.rs         CLI: start, --check, --print-network-setup/-teardown, signals
+  server.rs       start the listeners, reload the config (SIGHUP), stop cleanly
+  intercept.rs    one intercepted connection: status ping, join, or pass through
+  motd.rs         replace line 1/2 in a status response; offline documents
+  chat.rs         chat components ⇄ § colour codes
+  protocol.rs     VarInt, packets, handshake — only what happens before login
+  transparent.rs  TPROXY sockets: the listener, and connecting "as the player"
+  netsetup.rs     generates the nftables / routing / firewall scripts from the config
+  config.rs       config file, defaults, validation
+  observe.rs      Prometheus metrics
+tests/            integration tests for intercept.rs
+dev/              dev lab and end-to-end test
+deploy/           config template, container entrypoint, compose, systemd
+.github/          CI and image publishing
 ```
 
-## Wie eine Verbindung läuft
+## How a connection flows
 
 ```text
-1. nftables leitet neue Verbindungen auf `ports` an 127.0.0.1:25500 / [::1]:25500
-2. intercept::run nimmt sie an; die lokale Adresse des Sockets ist das
-   ursprüngliche Ziel (nach Dockers DNAT: der Kunden-Container)
-3. transparent::connect verbindet dorthin, gebunden an die Spieler-IP
-4. intercept::sniff liest die ersten Bytes des Clients:
-     Handshake mit next_state=status + Status-Request  → Status
-     alles andere, oder der Server sendet zuerst       → durchreichen
-5. Status: Antwort des Servers lesen, motd::rewrite_status, weitergeben
-6. Danach in beiden Fällen: copy_bidirectional bis zum Ende
+1. nftables hands new connections on `ports` to 127.0.0.1:25500 / [::1]:25500
+2. intercept::run accepts them; the socket's local address is the original
+   destination (after Docker's DNAT: the customer's container)
+3. transparent::connect connects there, bound to the player's address
+     └─ fails → answer_offline: offline MOTD, kick message, or close
+4. intercept::sniff reads the client's first bytes:
+     handshake with next_state=status + status request  → status
+     handshake with next_state=login/transfer           → join
+     anything else, or the server speaks first          → pass through
+5. status: read the server's answer, motd::rewrite_status, pass it on
+6. then, in every case: copy_bidirectional until either side closes
 ```
 
-Grundregel im ganzen Code: **im Zweifel durchreichen**. Kein Fehler beim
-Anschauen des Verkehrs darf eine Kundenverbindung kaputtmachen; schlimmstenfalls
-fehlt die Zeile.
+The rule throughout: **when in doubt, pass through**. Nothing that goes wrong
+while looking at the traffic may break a customer's connection; at worst the
+line is missing.
 
-### Die Firewall-Regeln
+### The firewall rules
 
-`netsetup.rs` erzeugt alles. Zwei conntrack-Markierungen halten die Richtungen
-auseinander:
+`netsetup.rs` generates everything. Two conntrack marks keep the directions
+apart:
 
-| Markierung | an | wofür |
+| mark | on | purpose |
 |---|---|---|
-| `0x6d63` | abgefangener Spieler-Verbindung | weitere Pakete des Spielers → Gateway |
-| `0x6d65` | Verbindung Gateway → Server | Antworten des Servers → Gateway |
-| `0x6d64` | Socket des Gateways (`SO_MARK`) | setzt `0x6d65` im `output` |
-| `0x6d67` | Paket | Routing-Tabelle `6767`: lokal zustellen |
+| `0x6d63` | an intercepted player connection | the player's next packets → gateway |
+| `0x6d65` | a connection gateway → server | the server's replies → gateway |
+| `0x6d64` | the gateway's socket (`SO_MARK`) | sets `0x6d65` in `output` |
+| `0x6d67` | a packet | routing table `6767`: deliver locally |
 
-Server-Antworten werden an zwei Stellen abgefangen: in `prerouting` (Container
-hinter einer Bridge) und in `output` (normale Prozesse und `docker-proxy`, was
-Docker für IPv6 ohne Container-IPv6 nutzt).
+Server replies are caught in two places: `prerouting` for containers behind a
+bridge, and `output` for plain processes and `docker-proxy`, which Docker uses
+for IPv6 when a container has no IPv6 address.
 
-Die TPROXY-Regel greift nur, wenn ein Socket lauscht. Ist das Gateway weg,
-fließt der Verkehr normal weiter — das ist das Fail-open.
+The TPROXY rule only matches when a socket is listening. With the gateway gone,
+traffic flows normally — that is the fail-open.
 
-## Bauen und testen
+## Build and test
 
 ```bash
 cargo build
-cargo test                    # Unit- und Integrationstests, laufen auch auf macOS
-cargo clippy --all-targets
+cargo test                    # unit and integration tests; run on macOS too
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
 ```
 
-Die Integrationstests in `tests/intercept.rs` rufen `intercept::handle` direkt
-mit der Adresse eines Fake-Servers auf. So läuft die Logik ohne TPROXY — auch
-auf dem Mac. Der Fake-Server wartet wie ein echter auf Handshake **und**
-Status-Request, bevor er antwortet; das war früher die Ursache eines echten Bugs.
+The integration tests in `tests/intercept.rs` call `intercept::handle` directly
+with a fake server's address, so the logic runs without TPROXY — on a Mac too.
+The fake server waits for the handshake **and** the status request before it
+answers, like a real one; not doing so once hid a real bug.
 
-Linux-Code auf dem Mac gegenprüfen:
+Check the Linux-only code from a Mac:
 
 ```bash
-rustup target add x86_64-unknown-linux-musl   # einmalig
+rustup target add x86_64-unknown-linux-musl   # once
 cargo check --target x86_64-unknown-linux-musl
 ```
 
-## Dev-Lab
+## Dev lab
 
-`dev/lab.sh` baut einen simulierten Hosting-Node, gegen den du einen **echten
-Minecraft-Client** verbinden kannst. Braucht nur Docker (OrbStack oder Docker
-Desktop reichen).
+`dev/lab.sh` builds a simulated hosting node you can point a **real Minecraft
+client** at. It only needs Docker (OrbStack or Docker Desktop are fine).
 
 ```text
-dein Rechner                 Docker
+your machine                 Docker
                            ┌──────────────────────────────────────────┐
-Minecraft ─ localhost:35565│ Lab-Node (docker:dind)                   │
-            localhost:35566│   mc-gateway      (Host-Netz des Nodes)  │
+Minecraft ─ localhost:35565│ lab node (docker:dind)                   │
+            localhost:35566│   mc-gateway       (node's host network) │
             localhost:35567│   survival :30000 ─┐                     │
-                           │   creative :30001 ─┼─ Kunden-Container   │
-                           │   skyblock :30002 ─┘  mit Port-Bindings  │
+                           │   creative :30001 ─┼─ customer containers│
+                           │   skyblock :30002 ─┘  with port bindings │
                            └──────────────────────────────────────────┘
 ```
 
 ```bash
-dev/lab.sh up              # alles starten
-dev/lab.sh ping 35565      # Status-Ping vom Rechner aus
-dev/lab.sh reload          # nach Änderung von dev/gateway.yaml
-dev/lab.sh gateway         # nach Code-Änderungen: neu bauen und neu starten
-dev/lab.sh stop-gateway    # Fail-open ansehen
-dev/lab.sh logs            # Gateway-Log
-dev/lab.sh down            # alles entfernen
+dev/lab.sh up               # start everything
+dev/lab.sh ping 35565       # status ping from your machine
+dev/lab.sh reload           # after editing dev/gateway.yaml
+dev/lab.sh gateway          # after code changes: rebuild and restart
+dev/lab.sh stop survival    # see the offline MOTD; `start survival` brings it back
+dev/lab.sh stop-gateway     # see the fail-open
+dev/lab.sh logs             # gateway log
+dev/lab.sh down             # remove everything
 ```
 
-In Minecraft `localhost:35565` bis `35567` als Server eintragen. Die drei
-Fake-Server (`dev/mc_server.py`) beantworten nur die Serverliste. Zum
-Beitreten `PAPER=1 dev/lab.sh up` — dann ist `localhost:35567` ein echter
-Paper-Server (der erste Start lädt ihn herunter, das dauert).
+Add `localhost:35565` to `35567` as servers in Minecraft. The three fake servers
+(`dev/mc_server.py`) only answer the server list. To join, start with
+`PAPER=1 dev/lab.sh up` — `localhost:35567` is then a real Paper server (its
+first start downloads it, which takes a while).
 
-Sind die Ports belegt, verschiebt `LAB_PORT=40000 dev/lab.sh up` sie.
+If the ports are taken, `LAB_PORT=40000 dev/lab.sh up` moves them.
 
-Die MOTD live ausprobieren: `motd.line2` in `dev/gateway.yaml` ändern,
-`dev/lab.sh reload`, in Minecraft die Serverliste aktualisieren.
+To try MOTD changes live: edit `motd.line2` or `offline` in `dev/gateway.yaml`,
+run `dev/lab.sh reload`, refresh the server list.
 
-## End-to-End-Test
+## End-to-end test
 
 ```bash
 dev/check.sh
 ```
 
-Baut das Image, startet einen eigenen Lab-Node und prüft auf Kernel-Ebene, über
-IPv4 **und** IPv6, für drei Arten von Kundenserver (Container ohne IPv6,
-Container mit IPv6, normaler Prozess):
+Builds the image, starts its own lab node, and checks at the kernel level, over
+IPv4 **and** IPv6, for three kinds of customer server (container without IPv6,
+container with IPv6, plain process):
 
-- die Zeile wird ersetzt, Spielerzahl und erste Zeile bleiben
-- der Server sieht beim Login dieselbe Adresse wie ohne Gateway
-- Ports außerhalb des Bereichs bleiben unberührt, geschlossene Ports geschlossen
-- Fail-open bei gestopptem Gateway
-- Neustart ohne doppelte Regeln
-- Host-Firewall mit `INPUT DROP` auf beiden Familien
-- Teardown entfernt alles
+- the line is replaced, player count and first line stay
+- the server sees the same address on login as without the gateway
+- ports outside the range are untouched
+- a port without a server, and a customer container that is stopped, show the
+  offline MOTD and kick message; a restarted server gets its own MOTD back
+- fail-open with the gateway stopped
+- restart without duplicated rules
+- host firewall with `INPUT DROP` on both families
+- teardown removes everything
 
-Dauert ein paar Minuten und räumt am Ende auf. **Vor jeder Änderung an
-`intercept.rs`, `transparent.rs` oder `netsetup.rs` laufen lassen** — die
-Unit-Tests können die Firewall-Regeln nicht prüfen.
+It takes a few minutes and cleans up after itself. CI runs it on every push;
+run it locally before changing `intercept.rs`, `transparent.rs` or
+`netsetup.rs` — the unit tests cannot check the firewall rules.
 
-## Offene Punkte
+## CI and releases
 
-- **Ausnahmen pro Kunde** — alle Server eines Nodes bekommen dieselbe Zeile. Ein
-  Tarif ohne Werbung bräuchte eine Liste von Ports ohne Rewrite, per `SIGHUP`
-  neu ladbar.
-- **Neustart trennt Spieler** — deren Verbindung läuft durch den Prozess. Updates
-  daher außerhalb der Hauptspielzeit.
-- **firewalld** und **Wings auf einem echten Node** sind nicht getestet; die
-  systemd-Unit ebenfalls nicht (der Docker-Weg schon).
+`.github/workflows/ci.yml` runs on every push and pull request. The image is
+only published once the tests and the end-to-end test pass.
+
+| job | |
+|---|---|
+| `test` | `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test` |
+| `e2e` | `dev/check.sh` on a GitHub runner |
+| `image` | builds the image for `linux/amd64` and `linux/arm64`; pushes to GHCR from the default branch (`edge`) and from `v*` tags |
+
+To release: `git tag v1.2.3 && git push --tags`. That publishes
+`ghcr.io/invalidjoker/mc-gateway:1.2.3`, `1.2`, `1` and `latest`.
+
+The Dockerfile cross-compiles on the build machine's own architecture instead
+of emulating the target, so both architectures build in minutes.
+
+## Open points
+
+- **Per-customer exemptions** — every server on a node gets the same line. A
+  plan without the ad would need a list of ports without the rewrite, reloadable
+  with `SIGHUP`.
+- **Restarts disconnect players** — their connection runs through the process.
+- **firewalld**, **Wings on a real node** and the **systemd unit** are untested
+  (the Docker path is tested).

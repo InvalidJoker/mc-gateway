@@ -1,15 +1,14 @@
-# mc-gateway on a hosting node, as a container. See docs/deployment.md.
+# mc-gateway on a hosting node. See docs/deployment.md.
 #
-#   docker compose up -d --build
+#   docker compose up -d
 #
 # Host networking and NET_ADMIN are required: the gateway installs the node's
 # firewall rules on start and then runs unprivileged with only that capability.
 
 services:
   mc-gateway:
-    build:
-      context: ..
-    image: mc-gateway:latest
+    image: ghcr.io/invalidjoker/mc-gateway:latest
+    # To build from this checkout instead: `build: ..`
     network_mode: host
     cap_add: [NET_ADMIN]
     volumes:

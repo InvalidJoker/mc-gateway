@@ -109,8 +109,19 @@ check_family IPv4 "$V4" seen4
 check_family IPv6 "$V6" seen6
 reject "IPv4: a port outside the range is untouched" "$(play "$V4" 30500 status)" "Hosted by"
 reject "IPv6: a port outside the range is untouched" "$(play "$V6" 30500 status)" "Hosted by"
-expect "IPv4: a port with no server stays closed"    "$(play "$V4" 30124 status)" "Error"
-expect "IPv6: a port with no server stays closed"    "$(play "$V6" 30124 status)" "Error"
+expect "IPv4: a port with no server is shown offline" "$(play "$V4" 30124 status)" "This server is offline"
+expect "IPv6: a port with no server is shown offline" "$(play "$V6" 30124 status)" "This server is offline"
+expect "  ...and still carries the node's line"       "$(play "$V4" 30124 status)" "Hosted by"
+expect "joining it shows the kick message"            "$(play "$V4" 30124 login)" "offline"
+
+echo
+echo "== a customer server stops and starts again =="
+node docker stop proxied >/dev/null
+expect "IPv4: stopped server is shown offline" "$(play "$V4" 30123 status)" "This server is offline"
+expect "IPv6: stopped server is shown offline" "$(play "$V6" 30123 status)" "This server is offline"
+node docker start proxied >/dev/null
+i=0; until play "$V4" 30123 status | grep -q PROXIED; do i=$((i + 1)); [ $i -lt 30 ] || break; sleep 1; done
+expect "started again: its own MOTD is back" "$(play "$V4" 30123 status)" "PROXIED"
 
 echo
 echo "== gateway stopped, rules left in place =="

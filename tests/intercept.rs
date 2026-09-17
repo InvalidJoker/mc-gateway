@@ -163,18 +163,105 @@ async fn a_pre_1_7_ping_passes_through() {
     assert_eq!(seen[0], vec![0xFE, 0x01]);
 }
 
+async fn stopped_server() -> SocketAddr {
+    TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap()
+}
+
 #[tokio::test]
-async fn a_stopped_server_looks_like_a_closed_port() {
-    let stopped = TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap();
-    let address = node(gateway(WITH_AD), stopped).await;
+async fn a_stopped_server_is_shown_offline_with_the_node_line() {
+    let address = node(gateway(WITH_AD), stopped_server().await).await;
+
+    let status = status_ping(address).await;
+    assert_eq!(
+        status["description"]["text"],
+        "\u{a7}cThis server is offline\n\u{a7}7Hosted by \u{a7}bexample.net"
+    );
+    assert_eq!(status["version"]["name"], "\u{a7}cOffline");
+    assert_eq!(status["version"]["protocol"], -1, "drawn as text instead of ping bars");
+    assert_eq!(status["players"]["online"], 0);
+}
+
+#[tokio::test]
+async fn the_offline_text_comes_from_the_config() {
+    let config = format!("{WITH_AD}offline:\n  motd: \"&eServer is sleeping\"\n  version: \"&eZzz\"\n");
+    let address = node(gateway(&config), stopped_server().await).await;
+
+    let status = status_ping(address).await;
+    let text = status["description"]["text"].as_str().unwrap();
+    assert!(text.starts_with("\u{a7}eServer is sleeping\n"), "{text}");
+    assert_eq!(status["version"]["name"], "\u{a7}eZzz");
+}
+
+#[tokio::test]
+async fn an_offline_server_answers_the_latency_ping() {
+    let address = node(gateway(WITH_AD), stopped_server().await).await;
 
     let mut stream = TcpStream::connect(address).await.unwrap();
+    stream.write_all(&handshake(NextState::Status)).await.unwrap();
+    stream.write_all(&encode_packet(STATUS_REQUEST_ID, &[])).await.unwrap();
+    read_packet(&mut stream).await.expect("offline status");
+
+    let mut ping = Writer::new();
+    ping.i64(42);
+    stream.write_all(&encode_packet(PING_ID, ping.as_slice())).await.unwrap();
+    let (id, body) = read_packet(&mut stream).await.expect("pong");
+    assert_eq!(id, PING_ID);
+    assert_eq!(Reader::new(&body).i64().unwrap(), 42);
+}
+
+#[tokio::test]
+async fn joining_an_offline_server_shows_the_kick_message() {
+    let address = node(gateway(WITH_AD), stopped_server().await).await;
+
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    let mut join = handshake(NextState::Login);
+    join.extend_from_slice(&login_start("Steve"));
+    stream.write_all(&join).await.unwrap();
+
+    let (id, body) = read_packet(&mut stream).await.expect("a login disconnect");
+    assert_eq!(id, 0x00);
+    let reason: serde_json::Value =
+        serde_json::from_str(&Reader::new(&body).string(262_144).unwrap()).unwrap();
+    assert!(reason["text"].as_str().unwrap().contains("offline"), "{reason}");
+}
+
+#[tokio::test]
+async fn the_kick_message_can_be_turned_off() {
+    let config = format!("{WITH_AD}offline:\n  kick: null\n");
+    let address = node(gateway(&config), stopped_server().await).await;
+
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    let mut join = handshake(NextState::Login);
+    join.extend_from_slice(&login_start("Steve"));
+    stream.write_all(&join).await.unwrap();
+
     let mut buf = Vec::new();
-    // No MOTD invented, no kick message: the connection simply ends.
-    let read = time::timeout(Duration::from_secs(3), stream.read_to_end(&mut buf))
-        .await
-        .expect("closed promptly");
-    assert!(buf.is_empty(), "nothing was sent, got {read:?}");
+    time::timeout(Duration::from_secs(3), stream.read_to_end(&mut buf)).await.expect("closed").ok();
+    assert!(buf.is_empty(), "closed without a message");
+}
+
+#[tokio::test]
+async fn with_offline_answers_disabled_a_stopped_server_is_a_closed_port() {
+    let config = format!("{WITH_AD}offline:\n  enabled: false\n");
+    let address = node(gateway(&config), stopped_server().await).await;
+
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    stream.write_all(&handshake(NextState::Status)).await.unwrap();
+    stream.write_all(&encode_packet(STATUS_REQUEST_ID, &[])).await.unwrap();
+    let mut buf = Vec::new();
+    time::timeout(Duration::from_secs(3), stream.read_to_end(&mut buf)).await.expect("closed promptly").ok();
+    assert!(buf.is_empty(), "nothing invented");
+}
+
+#[tokio::test]
+async fn something_that_is_not_minecraft_on_an_offline_port_just_closes() {
+    let address = node(gateway(WITH_AD), stopped_server().await).await;
+
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    stream.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
+    let mut buf = Vec::new();
+    time::timeout(Duration::from_secs(3), stream.read_to_end(&mut buf)).await.expect("closed promptly").ok();
+    assert!(buf.is_empty(), "no Minecraft answer to a non-Minecraft client");
 }
 
 #[tokio::test]

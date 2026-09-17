@@ -1,73 +1,89 @@
 # Deployment
 
-Das Gateway läuft auf **jedem Node**, auf dem Kundenserver laufen. Pro Node eine
-Instanz mit einer Config.
+Run one gateway on **every node** that hosts customer servers, with one config
+per node.
 
-## Wie es auf dem Node arbeitet
+## How it works on a node
 
 ```text
-Spieler ──▶ node:30123
-              │
-              │ nftables: Port in `ports`?
-              ├── nein ─────────────────────────────▶ Kunden-Container (wie immer)
-              │
-              └── ja ──▶ mc-gateway ──▶ Kunden-Container
-                           │               (sieht die Spieler-IP)
+player ──▶ node:30123
+             │
+             │ nftables: port in `ports`?
+             ├── no ──────────────────────────────▶ customer container (as always)
+             │
+             └── yes ──▶ mc-gateway ──▶ customer container
+                           │               (sees the player's IP)
                            │
-                           ├─ Status-Ping: Antwort des Servers holen,
-                           │               Zeile 2 ersetzen, zurückgeben
-                           └─ alles andere: Bytes unverändert durchreichen
+                           ├─ status ping:  fetch the server's answer,
+                           │                replace line 2, pass it back
+                           ├─ server down:  answer with the offline MOTD / kick
+                           └─ anything else: pass the bytes through untouched
 ```
 
-Beim Start installiert das Gateway eine nftables-Tabelle `mcgateway`, eine
-Routing-Regel (Tabelle `6767`) und eine `INPUT`-Freigabe für seine eigene
-Markierung. Die Regeln erzeugt es aus der Config selbst, Ports und Firewall
-können also nicht auseinanderlaufen.
+On start the gateway installs an nftables table `mcgateway`, a routing rule
+(table `6767`) and an `INPUT` rule accepting its own mark. It generates all of
+them from its config, so the port range and the firewall cannot drift apart.
 
-## Voraussetzungen
+## Requirements
 
-- Linux mit nftables (jede aktuelle Distribution)
-- `ip`, `nft`, `iptables`/`ip6tables` — im Docker-Image enthalten
-- Kundenserver als Docker-Container mit veröffentlichten Ports (Pterodactyl,
-  Pelican) oder als normale Prozesse auf dem Node
+- Linux with nftables (any current distribution)
+- `ip`, `nft`, `iptables`/`ip6tables` — included in the container image
+- Customer servers as Docker containers with published ports (Pterodactyl,
+  Pelican) or as plain processes on the node
 
-## Konfiguration
+## Configuration
 
-[`deploy/config.yaml`](../deploy/config.yaml) ist die Vorlage. Das Wichtigste:
+[`deploy/config.yaml`](../deploy/config.yaml) is the template. The keys that
+matter:
 
-| Schlüssel | Bedeutung |
+| key | meaning |
 |---|---|
-| `ports` | Portbereich(e) eurer Kundenserver, z. B. `["25565-25665", "30000-31000"]` |
-| `motd.line2` | Eure Zeile. `&`-Farbcodes und `&#rrggbb` funktionieren |
-| `motd.line1` | Optional: ersetzt auch die erste Zeile (die gehört normalerweise dem Kunden) |
-| `listen` / `listen_v6` | Interne Übergabe-Adressen. Nur ändern, wenn Port 25500 belegt oder im Bereich ist. `listen_v6: null` schaltet IPv6 ab |
-| `timeouts.drain` | Wie lange laufende Verbindungen beim Stoppen noch bekommen |
-| `metrics` | Prometheus-Endpunkt, standardmäßig aus |
-| `log.client_ip` | Spieler-IPs loggen, standardmäßig aus |
+| `ports` | your customer port range(s), e.g. `["25565-25665", "30000-31000"]` |
+| `motd.line2` | your line. `&` colour codes and `&#rrggbb` work |
+| `motd.line1` | optional: replaces the first line too (normally the customer's) |
+| `offline.motd` | server list text for a server that does not answer |
+| `offline.version` | shown in red where the ping bars would be |
+| `offline.kick` | disconnect message for a player joining an offline server; `null` just closes |
+| `offline.enabled` | `false` makes an offline server's port behave like a closed port |
+| `listen` / `listen_v6` | internal hand-over addresses; change only if port 25500 is taken or inside `ports`. `listen_v6: null` turns IPv6 off |
+| `timeouts.drain` | how long open connections get when the gateway stops |
+| `metrics` | Prometheus endpoint, off by default |
+| `log.client_ip` | log player addresses, off by default |
 
-Prüfen ohne zu starten:
+Check a config without starting anything:
 
 ```bash
-mc-gateway --config /etc/mc-gateway/config.yaml --check
+docker run --rm -v "$PWD/config.yaml:/c.yaml:ro" --entrypoint mc-gateway \
+    ghcr.io/invalidjoker/mc-gateway:latest --config /c.yaml --check
 ```
 
 ## Installation
 
-### Variante A: Docker (empfohlen)
+### Option A: Docker (recommended)
 
 ```bash
-git clone <repo> /opt/mc-gateway && cd /opt/mc-gateway/deploy
-nano config.yaml                      # Ports und Zeile eintragen
-docker compose up -d --build
+mkdir -p /opt/mc-gateway && cd /opt/mc-gateway
+curl -fsSLO https://raw.githubusercontent.com/InvalidJoker/mc-gateway/HEAD/deploy/compose.yml
+curl -fsSLO https://raw.githubusercontent.com/InvalidJoker/mc-gateway/HEAD/deploy/config.yaml
+nano config.yaml                      # ports and your line
+docker compose up -d
 docker compose logs -f
 ```
 
-[`deploy/compose.yml`](../deploy/compose.yml) setzt `network_mode: host` und
-`cap_add: [NET_ADMIN]`; beides ist nötig. Der Container richtet die Regeln als
-root ein und läuft danach als unprivilegierter Nutzer mit nur dieser einen
-Capability.
+[`deploy/compose.yml`](../deploy/compose.yml) sets `network_mode: host` and
+`cap_add: [NET_ADMIN]`; both are required. The container installs the rules as
+root and then runs as an unprivileged user holding only that one capability.
 
-### Variante B: systemd
+Images are published to `ghcr.io/invalidjoker/mc-gateway` for `linux/amd64`
+and `linux/arm64`:
+
+| tag | |
+|---|---|
+| `latest`, `1`, `1.2`, `1.2.3` | releases (git tags `v1.2.3`) |
+| `edge` | the latest commit on the default branch |
+| `sha-abc1234` | a specific commit |
+
+### Option B: systemd
 
 ```bash
 cargo build --release
@@ -78,123 +94,129 @@ sudo install -m 644 deploy/mc-gateway.service /etc/systemd/system/
 sudo systemctl enable --now mc-gateway
 ```
 
-Die Unit nutzt die Firewall-Werkzeuge des Hosts — sinnvoll, wenn der Host noch
-iptables-legacy verwendet (das Docker-Image bringt iptables-nft mit).
+The unit uses the host's own firewall tools — the better choice when the host
+still runs iptables-legacy (the image ships iptables-nft).
 
-## Prüfen, ob es läuft
+## Checking it works
 
-1. **Log** — beim Start erscheinen `network setup installed` und je eine Zeile
-   `intercepting` für IPv4 und IPv6.
-2. **Von außen pingen** — einen Kundenserver in die Minecraft-Serverliste
-   eintragen. Die zweite Zeile muss eure sein.
-3. **Metriken** (falls aktiviert):
+1. **Log** — on start you see `network setup installed` and one `intercepting`
+   line each for IPv4 and IPv6.
+2. **Ping from outside** — add a customer server to your Minecraft server list.
+   The second line must be yours. Stop that server: it must show as offline.
+3. **Metrics**, if enabled:
 
    ```bash
    curl -s localhost:9100/metrics | grep mc_gateway
    ```
 
-   | Metrik | |
+   | metric | |
    |---|---|
-   | `mc_gateway_status_requests_total` | erkannte Status-Pings |
-   | `mc_gateway_motd_rewrites_total` | davon mit eurer Zeile |
-   | `mc_gateway_connections_active` | Verbindungen gerade durch das Gateway |
-   | `mc_gateway_server_unreachable_total` | Server hat nicht geantwortet (z. B. gestoppt) |
+   | `mc_gateway_status_requests_total` | status pings recognised |
+   | `mc_gateway_motd_rewrites_total` | of those, answered with your line |
+   | `mc_gateway_offline_answers_total` | offline MOTDs and kicks for unreachable servers |
+   | `mc_gateway_connections_active` | connections currently running through the gateway |
+   | `mc_gateway_server_unreachable_total` | connections whose server did not answer |
 
-   Liegen `status_requests` und `motd_rewrites` dauerhaft auseinander,
-   antworten Server mit etwas, das nicht umgeschrieben werden kann. Sie bekommen
-   dann ihre Original-Antwort.
+   If `status_requests` and `motd_rewrites` stay apart, some servers answer with
+   something that cannot be rewritten; they get their original answer.
 
-## Betrieb
+## Operating it
 
-**Zeile ändern** — `motd.line2` bearbeiten, dann neu laden. Keine Verbindung
-bricht ab:
+**Change your line or the offline texts** — edit the config, then reload. No
+connection is dropped:
 
 ```bash
 docker compose kill -s HUP          # Docker
 systemctl reload mc-gateway         # systemd
 ```
 
-**Ports ändern** — Config bearbeiten und **neu starten**. Die Firewall-Regeln
-werden beim Start erzeugt.
+**Change the ports** — edit the config and **restart**. The firewall rules are
+generated on start.
 
-**Neustart und Updates** — ⚠️ Spieler, die gerade über das Gateway verbunden
-sind, werden beim Stoppen getrennt; ihre Verbindung läuft durch den Prozess.
-Neue Verbindungen gehen, solange das Gateway nicht läuft, direkt zum Server.
-Updates also außerhalb der Hauptspielzeit einspielen:
+**Restarts and updates** — ⚠️ players currently connected through the gateway
+are disconnected when it stops; their connection runs through the process.
+While it is down, new connections go straight to the servers. Update outside
+peak hours:
 
 ```bash
-git pull && docker compose up -d --build
+docker compose pull && docker compose up -d
 ```
 
-**Last** — der gesamte Spielverkehr intercepteter Verbindungen läuft durch das
-Gateway. Das kostet pro Spieler zwei Sockets und etwas CPU fürs Kopieren.
-`LimitNOFILE` in der systemd-Unit ist entsprechend hoch gesetzt.
+**Load** — all traffic of intercepted connections runs through the gateway:
+two sockets and some CPU for copying per player. `LimitNOFILE` in the systemd
+unit is set accordingly.
 
-## Was ein Kundenserver sieht
+## What a customer's server sees
 
-Dieselbe Absenderadresse wie ohne Gateway, nur mit anderem Quellport:
+The same player address it would see without the gateway, on a different
+source port:
 
-| Server | IPv4-Spieler | IPv6-Spieler |
+| server | IPv4 player | IPv6 player |
 |---|---|---|
-| Container, Docker-Netz ohne IPv6 (Standard) | Spieler-IP | Docker-Bridge, z. B. `172.17.0.1` |
-| Container, Docker-Netz mit IPv6 | Spieler-IP | Spieler-IPv6 |
-| normaler Prozess auf dem Node | Spieler-IP | Spieler-IPv6 |
+| container, Docker network without IPv6 (default) | player's IP | Docker's bridge address, e.g. `172.17.0.1` |
+| container, Docker network with IPv6 | player's IP | player's IPv6 |
+| plain process on the node | player's IP | player's IPv6 |
 
-Die Bridge-Adresse in Zeile 1 kommt von Docker selbst (`docker-proxy`), nicht
-vom Gateway. Mit IPv6 im Docker-Netz der Kunden verschwindet sie.
+The bridge address in the first row is Docker's doing (`docker-proxy`), not the
+gateway's. Enabling IPv6 on the customers' Docker network removes it.
 
-## Verhalten im Fehlerfall
+## Failure behaviour
 
-| Situation | Ergebnis |
+| situation | result |
 |---|---|
-| Gateway gestoppt oder abgestürzt | Verbindungen gehen direkt zum Server, ohne eure Zeile |
-| Kundenserver gestoppt | Verbindung wird geschlossen, wie bei einem geschlossenen Port |
-| Server antwortet mit Unlesbarem | Original-Antwort geht durch |
-| Kein Minecraft (RCON, HTTP, …) auf dem Port | unverändert durchgereicht |
-| Host-Firewall mit `INPUT DROP` (ufw) | funktioniert, das Gateway setzt seine Freigabe selbst |
-| Node ohne IPv6 | nur IPv4 wird abgefangen, Warnung im Log |
+| customer server stopped, or no server on the port | offline MOTD in the server list, kick message on join |
+| gateway stopped or crashed | connections go straight to the servers, without your line |
+| server answers with something unreadable | its original answer passes through |
+| not Minecraft on the port (RCON, HTTP, …) | passed through untouched; closed if the server is down |
+| host firewall with `INPUT DROP` (ufw) | works — the gateway adds its own rule |
+| node without IPv6 | only IPv4 is intercepted, with a warning in the log |
 
-## Host-Firewall
+Note that every port in `ports` without a server answers with the offline MOTD,
+so a port scan of the range shows Minecraft servers on all of them. Set
+`offline.enabled: false` if that matters to you.
 
-Abgefangene Verbindungen laufen durch die `INPUT`-Chain, was veröffentlichte
-Docker-Ports sonst nie tun. Das Gateway fügt deshalb beim Start in `iptables`
-und `ip6tables` ein:
+## Host firewall
+
+Intercepted connections are delivered to the node itself, so they cross the
+`INPUT` chain, which published Docker ports otherwise never do. On start the
+gateway therefore adds to `iptables` and `ip6tables`:
 
 ```text
 -A INPUT -m mark --mark 0x6d67 -j ACCEPT
 ```
 
-Eine Portfreigabe hilft hier nicht: nach Dockers DNAT trägt das Paket den
-internen Container-Port. Getestet mit einer `INPUT DROP`-Policy. **firewalld**
-verwaltet eigene Regeln, dort muss dieselbe Freigabe (fwmark `0x6d67` in input)
-von Hand eingetragen werden — das ist ungetestet.
+Opening the port range would not help: after Docker's DNAT the packet carries
+the container's internal port. Tested with an `INPUT DROP` policy. **firewalld**
+keeps its own rules, where this has no effect; the same exception (fwmark
+`0x6d67` in input) has to be added there by hand — untested.
 
-## Entfernen
+## Removing it
 
 ```bash
 docker compose down
-docker run --rm --network host --cap-add NET_ADMIN --entrypoint sh mc-gateway:latest \
-    -c 'mc-gateway --print-network-teardown | sh'
+docker run --rm --network host --cap-add NET_ADMIN --entrypoint sh \
+    ghcr.io/invalidjoker/mc-gateway:latest -c 'mc-gateway --print-network-teardown | sh'
 ```
 
-Mit systemd:
+With systemd:
 
 ```bash
 sudo systemctl disable --now mc-gateway
 mc-gateway --print-network-teardown | sudo sh
 ```
 
-Bleiben die Regeln nach dem Stoppen stehen, ist das unschädlich: Ohne laufendes
-Gateway greifen sie nicht.
+Rules left behind after stopping are harmless: without a running gateway they
+do not match.
 
-## Fehlersuche
+## Troubleshooting
 
-| Symptom | Ursache |
+| symptom | cause |
 |---|---|
-| `cannot set IP_TRANSPARENT … Operation not permitted` | `NET_ADMIN` fehlt (`cap_add` bzw. `AmbientCapabilities`) |
-| Keine Zeile, Verbindung klappt | Gateway läuft nicht, oder Port nicht in `ports` |
-| Spieler kommen nicht mehr rein, sobald das Gateway läuft | eine Firewall verwirft `INPUT` und die Freigabe greift nicht (firewalld, iptables-legacy im Docker-Betrieb → systemd-Variante nehmen) |
-| `listen port … lies inside ports` | `listen` auf einen Port außerhalb des Bereichs legen |
+| `cannot set IP_TRANSPARENT … Operation not permitted` | `NET_ADMIN` is missing (`cap_add` or `AmbientCapabilities`) |
+| no line, but connections work | gateway not running, or the port is not in `ports` |
+| players cannot connect once the gateway runs | a firewall drops `INPUT` and the gateway's rule has no effect (firewalld, or iptables-legacy with the container → use systemd) |
+| every port shows offline | the servers are unreachable from the node itself — check `docker ps` and the published ports |
+| `listen port … lies inside ports` | move `listen` to a port outside the range |
 
-Aktive Regeln ansehen: `nft list table inet mcgateway`. Was installiert würde,
-ohne etwas zu ändern: `mc-gateway --print-network-setup`.
+Inspect the active rules: `nft list table inet mcgateway`. See what would be
+installed without changing anything: `mc-gateway --print-network-setup`.

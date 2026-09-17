@@ -28,6 +28,8 @@ pub struct Config {
     #[serde(default)]
     pub motd: Motd,
     #[serde(default)]
+    pub offline: Offline,
+    #[serde(default)]
     pub timeouts: Timeouts,
     #[serde(default)]
     pub metrics: Metrics,
@@ -56,6 +58,33 @@ impl Motd {
     /// Whether status pings have to be looked at at all.
     pub fn rewrites_anything(&self) -> bool {
         self.line1.is_some() || self.line2.is_some()
+    }
+}
+
+/// What players see when the server behind a port does not answer — stopped,
+/// crashed, or no server allocated to that port at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Offline {
+    /// When off, an unreachable server's port simply closes the connection.
+    pub enabled: bool,
+    /// The server list MOTD. `motd.line1`/`line2` still apply on top of it.
+    pub motd: String,
+    /// Shown in red where the ping bars would be.
+    pub version: String,
+    /// Disconnect message for a player trying to join. `null` closes the
+    /// connection without one.
+    pub kick: Option<String>,
+}
+
+impl Default for Offline {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            motd: "&cThis server is offline".into(),
+            version: "&cOffline".into(),
+            kick: Some("&cThis server is offline right now.\n&7Try again later.".into()),
+        }
     }
 }
 
@@ -340,6 +369,24 @@ mod tests {
         for bad in ["40000-30000", "0-10", "70000", "a-b"] {
             assert!(bad.parse::<PortRange>().is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn offline_answers_are_on_by_default_and_configurable() {
+        let default = load(MINIMAL).unwrap().config.offline;
+        assert!(default.enabled);
+        assert!(default.kick.is_some());
+
+        let custom = load(&format!(
+            "{MINIMAL}offline:\n  motd: \"&cSleeping\"\n  version: \"&cZzz\"\n  kick: null\n"
+        ))
+        .unwrap()
+        .config
+        .offline;
+        assert_eq!(custom.motd, "&cSleeping");
+        assert_eq!(custom.version, "&cZzz");
+        assert_eq!(custom.kick, None);
+        assert!(custom.enabled, "unset keys keep their defaults");
     }
 
     #[test]

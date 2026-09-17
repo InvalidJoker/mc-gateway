@@ -27,11 +27,11 @@ use tokio::{
 use tracing::{debug, error, info};
 
 use crate::{
-    config::Motd,
+    config::{Config, Motd},
     motd, observe,
     protocol::{
-        Handshake, NextState, STATUS_RESPONSE_ID, decode_frame, decode_frame_limited,
-        encode_status_response, read_varint,
+        Handshake, NextState, PING_ID, STATUS_RESPONSE_ID, decode_frame, decode_frame_limited,
+        encode_login_disconnect, encode_status_response, read_varint,
     },
     server::Gateway,
     transparent,
@@ -99,6 +99,8 @@ enum Outcome {
     Unreachable(String),
     /// The client left before saying anything useful.
     ClientGone,
+    /// The server was unreachable and the gateway answered for it.
+    Offline(&'static str),
     /// Piped through; `rewritten` tells whether the MOTD was changed.
     Piped { kind: &'static str, rewritten: bool, bytes: Option<(u64, u64)> },
 }
@@ -123,6 +125,9 @@ pub async fn handle(
             debug!(%client, server = %original, %reason, "server unreachable, client closed");
         }
         Outcome::ClientGone => debug!(%client, server = %original, "client left before speaking"),
+        Outcome::Offline(answer) => {
+            debug!(%client, server = %original, answer, "server offline, answered for it");
+        }
         Outcome::Piped { kind, rewritten, bytes } => {
             let (to_server, to_client) = bytes.unwrap_or_default();
             debug!(
@@ -152,6 +157,9 @@ async fn serve(
         Ok(upstream) => upstream,
         Err(err) => {
             observe::server_unreachable();
+            if config.offline.enabled {
+                return answer_offline(client, &config).await;
+            }
             return Outcome::Unreachable(err.to_string());
         }
     };
@@ -163,9 +171,9 @@ async fn serve(
 
     if motd.rewrites_anything() {
         let mut buf = Vec::with_capacity(512);
-        match sniff(&mut client, &upstream, &mut buf, config.timeouts.handshake).await {
+        match sniff(&mut client, Some(&upstream), &mut buf, config.timeouts.handshake).await {
             Sniff::ClientGone => return Outcome::ClientGone,
-            Sniff::PassThrough => {}
+            Sniff::PassThrough | Sniff::Join => {}
             Sniff::Status => {
                 kind = "status";
                 observe::status_request();
@@ -191,23 +199,91 @@ async fn serve(
     Outcome::Piped { kind, rewritten, bytes }
 }
 
+/// Answers for a server that did not accept the connection: the offline MOTD
+/// for a status ping, the kick message for a join, and a closed connection for
+/// anything that is not Minecraft.
+async fn answer_offline(mut client: TcpStream, config: &Config) -> Outcome {
+    let mut buf = Vec::with_capacity(512);
+    match sniff(&mut client, None, &mut buf, config.timeouts.handshake).await {
+        Sniff::Status => {
+            observe::status_request();
+            observe::offline_answered();
+            let document = motd::offline_status(&config.offline, &config.motd);
+            if client.write_all(&encode_status_response(&document)).await.is_err() {
+                return Outcome::ClientGone;
+            }
+            answer_ping(&mut client, &buf, config.timeouts.status).await;
+            Outcome::Offline("status")
+        }
+        Sniff::Join => {
+            observe::offline_answered();
+            if let Some(kick) = &config.offline.kick {
+                let packet = encode_login_disconnect(&motd::kick_message(kick));
+                let _ = client.write_all(&packet).await;
+                let _ = client.flush().await;
+            }
+            Outcome::Offline("kick")
+        }
+        Sniff::PassThrough => Outcome::Unreachable("server offline".into()),
+        Sniff::ClientGone => Outcome::ClientGone,
+    }
+}
+
+/// Answers the latency ping that follows a status response: the pong is the
+/// ping packet sent straight back.
+async fn answer_ping(client: &mut TcpStream, sniffed: &[u8], deadline: Duration) {
+    // Skip the handshake and the status request; a ping may already be behind them.
+    let mut buf = sniffed.to_vec();
+    for _ in 0..2 {
+        match decode_frame(&buf) {
+            Ok(frame) => {
+                let len = frame.total_len;
+                buf.drain(..len);
+            }
+            Err(_) => return,
+        }
+    }
+
+    loop {
+        match decode_frame(&buf) {
+            Ok(frame) if frame.id == PING_ID => {
+                let len = frame.total_len;
+                let _ = client.write_all(&buf[..len]).await;
+                let _ = client.flush().await;
+                return;
+            }
+            Ok(_) => return,
+            Err(err) if err.is_incomplete() => {}
+            Err(_) => return,
+        }
+        let mut chunk = [0u8; 64];
+        match timeout(deadline, client.read(&mut chunk)).await {
+            Ok(Ok(n)) if n > 0 => buf.extend_from_slice(&chunk[..n]),
+            _ => return,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Sniff {
     /// A status handshake followed by the complete status request.
     Status,
+    /// A login or transfer handshake: a player joining.
+    Join,
     /// Anything else: forward it untouched.
     PassThrough,
     /// The client closed or errored before anything could be decided.
     ClientGone,
 }
 
-/// Reads from the client until it is clear whether this is a status ping.
+/// Reads from the client until it is clear what kind of connection this is.
 ///
-/// Gives up — and passes through — as soon as the server sends something,
-/// which it would never do before a Minecraft client has spoken.
+/// With a server connected, gives up — and passes through — as soon as the
+/// server sends something, which it would never do before a Minecraft client
+/// has spoken.
 async fn sniff(
     client: &mut TcpStream,
-    upstream: &TcpStream,
+    upstream: Option<&TcpStream>,
     buf: &mut Vec<u8>,
     deadline: Duration,
 ) -> Sniff {
@@ -218,12 +294,20 @@ async fn sniff(
             }
             let mut chunk = [0u8; 2048];
             let mut probe = [0u8; 1];
+            let server_spoke = async {
+                match upstream {
+                    Some(upstream) => {
+                        let _ = upstream.peek(&mut probe).await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            };
             tokio::select! {
                 read = client.read(&mut chunk) => match read {
                     Ok(0) | Err(_) => return Sniff::ClientGone,
                     Ok(n) => buf.extend_from_slice(&chunk[..n]),
                 },
-                _ = upstream.peek(&mut probe) => return Sniff::PassThrough,
+                _ = server_spoke => return Sniff::PassThrough,
             }
         }
     };
@@ -264,7 +348,8 @@ fn classify(buf: &[u8]) -> Option<Sniff> {
     };
     match Handshake::decode(&frame) {
         Ok(handshake) if handshake.next_state == NextState::Status => {}
-        _ => return Some(Sniff::PassThrough),
+        Ok(_) => return Some(Sniff::Join),
+        Err(_) => return Some(Sniff::PassThrough),
     }
 
     // The server answers only once it has the status request, so it has to be
@@ -351,9 +436,9 @@ mod tests {
     }
 
     #[test]
-    fn a_login_passes_through_immediately() {
-        assert_eq!(classify(&handshake(2)), Some(Sniff::PassThrough));
-        assert_eq!(classify(&handshake(3)), Some(Sniff::PassThrough), "transfer too");
+    fn a_join_is_recognised_immediately() {
+        assert_eq!(classify(&handshake(2)), Some(Sniff::Join));
+        assert_eq!(classify(&handshake(3)), Some(Sniff::Join), "transfer too");
     }
 
     #[test]

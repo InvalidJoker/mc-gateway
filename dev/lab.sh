@@ -12,6 +12,8 @@
 #   dev/lab.sh gateway        rebuild and restart the gateway after code changes
 #   dev/lab.sh reload         re-read dev/gateway.yaml (edit the MOTD line live)
 #   dev/lab.sh stop-gateway   stop the gateway, to see fail-open
+#   dev/lab.sh stop survival  stop a customer server, to see the offline MOTD
+#   dev/lab.sh start survival start it again
 #   dev/lab.sh logs           follow the gateway log
 #   dev/lab.sh down           remove everything
 set -eu
@@ -80,6 +82,8 @@ MSG
 gateway) start_gateway ;;
 reload) node docker kill -s HUP gateway >/dev/null && echo "config reloaded" ;;
 stop-gateway) node docker stop gateway >/dev/null && echo "gateway stopped: pings now show the servers' own MOTD" ;;
+stop) node docker stop "${2:?server name: survival, creative, skyblock or paper}" >/dev/null && echo "stopped $2" ;;
+start) node docker start "${2:?server name}" >/dev/null && echo "started $2" ;;
 logs) node docker logs -f gateway ;;
 ping) python3 mc_player.py 127.0.0.1 "${2:?port}" status ;;
 down)
@@ -87,5 +91,5 @@ down)
     docker network rm "$NET" >/dev/null 2>&1 || true
     echo "lab removed"
     ;;
-*) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//' ;;
+*) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac

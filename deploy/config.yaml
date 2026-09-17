@@ -13,6 +13,15 @@ motd:
   # player count, version and icon stay theirs. `&` colour codes work.
   line2: "&7Hosted by &bexample.net"
 
+# When the server behind a port does not answer — stopped, crashed, or no
+# server on that port — the gateway answers in its place. The motd lines above
+# still apply, so your line 2 stays.
+offline:
+  enabled: true
+  motd: "&cThis server is offline"
+  version: "&cOffline"             # shown in red where the ping bars would be
+  kick: "&cThis server is offline right now.\n&7Try again later."   # null: just close
+
 timeouts:
   handshake: 5s    # undecided connections are passed through after this
   status: 10s

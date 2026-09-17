@@ -11,7 +11,31 @@
 
 use serde_json::{Value, json};
 
-use crate::{chat, config::Motd};
+use crate::{
+    chat,
+    config::{Motd, Offline},
+};
+
+/// Protocol number no client speaks, which makes the server list draw the
+/// version text (in red) instead of ping bars.
+const NO_PROTOCOL: i32 = -1;
+
+/// The status document for a server that does not answer. The configured MOTD
+/// lines are applied to it like to any other, so the node's line stays.
+pub fn offline_status(offline: &Offline, motd: &Motd) -> String {
+    let document = json!({
+        "version": { "name": chat::translate_colors(&offline.version), "protocol": NO_PROTOCOL },
+        "players": { "max": 0, "online": 0 },
+        "description": { "text": chat::translate_colors(&offline.motd) },
+    })
+    .to_string();
+    rewrite_status(&document, motd).unwrap_or(document)
+}
+
+/// The chat component for the disconnect message.
+pub fn kick_message(text: &str) -> String {
+    json!({ "text": chat::translate_colors(text) }).to_string()
+}
 
 /// Replaces the configured lines in a status response document.
 ///
@@ -140,6 +164,24 @@ mod tests {
         let text = description_text(&out);
         assert!(text.contains("A Minecraft Server"));
         assert!(text.contains("powered by Paper"));
+    }
+
+    #[test]
+    fn an_offline_server_gets_a_complete_document_with_the_node_line() {
+        let offline = Offline::default();
+        let value: Value =
+            serde_json::from_str(&offline_status(&offline, &motd(None, Some("&7ad")))).unwrap();
+        assert_eq!(value["description"]["text"], "\u{a7}cThis server is offline\n\u{a7}7ad");
+        assert_eq!(value["version"]["name"], "\u{a7}cOffline");
+        assert_eq!(value["version"]["protocol"], -1);
+        assert_eq!(value["players"]["online"], 0);
+    }
+
+    #[test]
+    fn without_motd_lines_the_offline_text_is_used_as_is() {
+        let offline = Offline { motd: "&cdown\n&7for maintenance".into(), ..Offline::default() };
+        let value: Value = serde_json::from_str(&offline_status(&offline, &motd(None, None))).unwrap();
+        assert_eq!(value["description"]["text"], "\u{a7}cdown\n\u{a7}7for maintenance");
     }
 
     #[test]

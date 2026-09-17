@@ -17,6 +17,7 @@ pub fn install(bind: SocketAddr) -> Result<(), String> {
     describe_counter!("mc_gateway_status_requests_total", "Status pings recognised");
     describe_counter!("mc_gateway_motd_rewrites_total", "Status responses that got the MOTD line");
     describe_counter!("mc_gateway_server_unreachable_total", "Connections whose server did not answer");
+    describe_counter!("mc_gateway_offline_answers_total", "Offline MOTDs and kicks sent for unreachable servers");
     Ok(())
 }
 
@@ -39,4 +40,8 @@ pub fn motd_rewritten() {
 
 pub fn server_unreachable() {
     counter!("mc_gateway_server_unreachable_total").increment(1);
+}
+
+pub fn offline_answered() {
+    counter!("mc_gateway_offline_answers_total").increment(1);
 }

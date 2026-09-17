@@ -285,6 +285,17 @@ impl Handshake {
     }
 }
 
+/// Packet id of the disconnect packet in the login state.
+pub const LOGIN_DISCONNECT_ID: i32 = 0x00;
+
+/// A login-state disconnect carrying a JSON chat component. The login state
+/// uses JSON text in every protocol version, unlike later states.
+pub fn encode_login_disconnect(reason_json: &str) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.string(reason_json);
+    encode_packet(LOGIN_DISCONNECT_ID, w.as_slice())
+}
+
 /// A status response packet carrying `json`.
 pub fn encode_status_response(json: &str) -> Vec<u8> {
     let mut w = Writer::new();
