@@ -13,7 +13,8 @@
 # The central assertion: whatever address a server sees for a player without
 # the gateway, it sees exactly the same with it.
 #
-# Nothing here touches the host's own firewall or Docker daemon.
+# Nothing here touches the host's own firewall or Docker daemon. Takes a few
+# minutes; run it before every change to the network code is merged.
 set -eu
 cd "$(dirname "$0")"
 
@@ -49,7 +50,7 @@ reject() { # description, output, pattern that must not match
 }
 
 echo "building the gateway image..."
-docker build -q -t mc-gateway:dev ../.. >/dev/null
+docker build -q -t mc-gateway:dev .. >/dev/null
 
 docker network create --ipv6 --subnet fd00:6d63:1::/64 "$NET" >/dev/null
 docker run -d --privileged --name "$NODE" --network "$NET" -v "$PWD:/lab:ro" docker:dind >/dev/null

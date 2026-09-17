@@ -1,0 +1,17 @@
+# mc-gateway on a hosting node, as a container. See docs/deployment.md.
+#
+#   docker compose up -d --build
+#
+# Host networking and NET_ADMIN are required: the gateway installs the node's
+# firewall rules on start and then runs unprivileged with only that capability.
+
+services:
+  mc-gateway:
+    build:
+      context: ..
+    image: mc-gateway:latest
+    network_mode: host
+    cap_add: [NET_ADMIN]
+    volumes:
+      - ./config.yaml:/etc/mc-gateway/config.yaml:ro
+    restart: unless-stopped

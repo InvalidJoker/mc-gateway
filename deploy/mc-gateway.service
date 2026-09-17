@@ -1,0 +1,43 @@
+[Unit]
+Description=mc-gateway: MOTD line for every Minecraft server on this node
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+# Installs the firewall and routing rules, generated from the config. `+` runs
+# it as root; the gateway itself stays unprivileged.
+ExecStartPre=+/bin/sh -c '/usr/local/bin/mc-gateway --config /etc/mc-gateway/config.yaml --print-network-setup | sh'
+ExecStart=/usr/local/bin/mc-gateway --config /etc/mc-gateway/config.yaml
+# Re-reads the MOTD lines without dropping a connection.
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2s
+
+User=mc-gateway
+Group=mc-gateway
+
+# The one capability the gateway needs: transparent sockets.
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+# Two file descriptors per player connection.
+LimitNOFILE=131072
+
+[Install]
+WantedBy=multi-user.target
