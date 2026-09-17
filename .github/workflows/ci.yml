@@ -25,6 +25,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked --no-run --message-format=json > test-binaries.json
+      - run: |
+          sudo apt-get install -y libcap2-bin
+          jq -r 'select(.profile.test == true) | .executable' test-binaries.json |
+            while read -r bin; do sudo setcap cap_net_admin+ep "$bin"; done
       - run: cargo test --locked
 
   e2e:
