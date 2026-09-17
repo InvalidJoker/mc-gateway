@@ -21,18 +21,35 @@ pub const fn is_supported() -> bool {
     cfg!(target_os = "linux")
 }
 
+/// Connects to `backend` from the client's address.
+///
+/// `preserve_port` binds the client's exact source port too. That must be off
+/// when the client's own connection is still in the conntrack table under the
+/// same address pair — which is the case for an intercepted connection — or
+/// the kernel cannot tell the two apart.
+///
+/// Every transparent socket carries [`crate::netsetup::SOCKET_MARK`], which
+/// the generated nftables rules use to find the replies and deliver them here.
 #[cfg(target_os = "linux")]
-pub async fn connect(backend: SocketAddr, client: SocketAddr) -> io::Result<TcpStream> {
+pub async fn connect(
+    backend: SocketAddr,
+    client: SocketAddr,
+    preserve_port: bool,
+) -> io::Result<TcpStream> {
     use std::os::fd::{FromRawFd, IntoRawFd};
 
     use socket2::SockAddr;
     use tokio::net::TcpSocket;
 
-    let bind_addr = match_family(client, backend)?;
+    let mut bind_addr = match_family(client, backend)?;
+    if !preserve_port {
+        bind_addr.set_port(0);
+    }
     let socket = transparent_socket(backend.is_ipv4())?;
     // Without SO_REUSEADDR a client reconnecting from the same port while the
     // previous socket lingers in TIME_WAIT would be refused.
     socket.set_reuse_address(true)?;
+    socket.set_mark(crate::netsetup::SOCKET_MARK)?;
     socket.set_nonblocking(true)?;
     socket.bind(&SockAddr::from(bind_addr))?;
 
@@ -78,8 +95,35 @@ pub fn preflight() -> io::Result<()> {
     transparent_socket(true).map(drop)
 }
 
+/// Binds a listener that accepts connections redirected to it by a TPROXY
+/// rule. Its accepted sockets report the address the client originally dialled
+/// as their local address.
+#[cfg(target_os = "linux")]
+pub fn listen(address: SocketAddr, backlog: u32) -> io::Result<tokio::net::TcpListener> {
+    use socket2::SockAddr;
+
+    let socket = transparent_socket(address.is_ipv4())?;
+    socket.set_reuse_address(true)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&SockAddr::from(address))?;
+    socket.listen(backlog as i32)?;
+    tokio::net::TcpListener::from_std(socket.into())
+}
+
 #[cfg(not(target_os = "linux"))]
-pub async fn connect(_backend: SocketAddr, _client: SocketAddr) -> io::Result<TcpStream> {
+pub fn listen(_address: SocketAddr, _backlog: u32) -> io::Result<tokio::net::TcpListener> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "port interception requires Linux TPROXY",
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub async fn connect(
+    _backend: SocketAddr,
+    _client: SocketAddr,
+    _preserve_port: bool,
+) -> io::Result<TcpStream> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "transparent forwarding requires Linux TPROXY",

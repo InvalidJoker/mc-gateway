@@ -33,6 +33,9 @@ pub enum Behaviour {
     Status(String),
     /// Accept and stay silent.
     Silent,
+    /// Send these bytes the moment a client connects, then echo — a protocol
+    /// where the server speaks first.
+    Banner(Vec<u8>),
 }
 
 /// One connection a fake backend saw.
@@ -63,6 +66,12 @@ impl FakeBackend {
                 let log = Arc::clone(&log);
                 let behaviour = behaviour.clone();
                 tokio::spawn(async move {
+                    if let Behaviour::Banner(banner) = &behaviour
+                        && stream.write_all(banner).await.is_err()
+                    {
+                        return;
+                    }
+
                     let mut head = vec![0u8; 8192];
                     let Ok(read) = stream.read(&mut head).await else { return };
                     head.truncate(read);
@@ -104,7 +113,7 @@ impl FakeBackend {
                                 }
                             }
                         }
-                        Behaviour::Echo => {
+                        Behaviour::Echo | Behaviour::Banner(_) => {
                             let mut buf = vec![0u8; 8192];
                             loop {
                                 match stream.read(&mut buf).await {

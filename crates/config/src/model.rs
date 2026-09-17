@@ -8,11 +8,15 @@ use std::{collections::BTreeMap, fmt, net::SocketAddr, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
-use crate::net::IpNets;
+use crate::{intercept::Intercept, net::IpNets};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    /// Port-range interception for hosting nodes. When set, `listeners`,
+    /// `routing` and `servers` may be left empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intercept: Option<Intercept>,
     pub listeners: Vec<Listener>,
     pub routing: Routing,
     /// Backend servers by name. 300 entries here is the design point.

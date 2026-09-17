@@ -35,6 +35,14 @@ through untouched.
                    Paper  Fabric  NeoForge
 ```
 
+## Two ways to run it
+
+- **Hosting node** — in front of every customer server on a port range, adding
+  your line to their MOTD and staying invisible otherwise. See
+  [hosting](docs/hosting.md).
+- **Edge gateway** — one public port in front of many backends, routed by
+  hostname. The rest of this README.
+
 ## What it does
 
 | | |
@@ -144,6 +152,7 @@ library: [`governor`] for rate limiting, [`ipnet`] for CIDRs,
 
 ## Documentation
 
+- [Hosting nodes](docs/hosting.md) — a line in every customer's MOTD, by port range
 - [Architecture](docs/architecture.md) — how a connection flows through it, and why the layers are separate
 - [Forwarding](docs/forwarding.md) — TPROXY, what it needs, and how to bring it up
 - [Operations](docs/operations.md) — deployment, metrics, reload, tuning, security

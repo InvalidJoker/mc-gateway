@@ -11,7 +11,7 @@ use tracing::{info, warn};
 
 use crate::{
     app::{App, ListenerRuntime},
-    listener, observe,
+    intercept, listener, observe,
 };
 
 /// A running gateway.
@@ -47,6 +47,19 @@ impl Server {
             bound.push((Arc::new(ListenerRuntime::from(listener)), socket, address));
         }
 
+        // Port interception: one transparent listener that the kernel hands
+        // every intercepted connection to.
+        let intercept_socket = match &loaded.config.intercept {
+            Some(intercept) => {
+                let socket = mc_forwarding::transparent::listen(intercept.listen, 4096).map_err(
+                    |err| format!("cannot start interception on {}: {err}", intercept.listen),
+                )?;
+                let address = socket.local_addr().map_err(|err| err.to_string())?;
+                Some((socket, address))
+            }
+            None => None,
+        };
+
         let metrics_config = loaded.config.metrics.clone();
         let drain = loaded.config.timeouts.drain;
         let app = App::start(loaded, config_path);
@@ -60,6 +73,16 @@ impl Server {
             listeners.push(tokio::spawn(listener::run(
                 socket,
                 context,
+                Arc::clone(&app),
+                app.shutdown_signal(),
+                sessions.clone(),
+            )));
+        }
+
+        if let Some((socket, address)) = intercept_socket {
+            addresses.push(("intercept".to_owned(), address));
+            listeners.push(tokio::spawn(intercept::run(
+                socket,
                 Arc::clone(&app),
                 app.shutdown_signal(),
                 sessions.clone(),

@@ -14,6 +14,7 @@
 //! proxy.
 
 pub mod inbound;
+pub mod netsetup;
 pub mod transparent;
 
 use std::{fmt, io, net::SocketAddr, time::Duration};
@@ -27,8 +28,12 @@ use tokio::{
 #[derive(Debug, Clone, Copy)]
 pub enum Origin {
     /// A client's connection — a session or a status ping being passed through.
-    /// On Linux this address is what the backend will see.
+    /// On Linux this address, port included, is what the backend will see.
     Client(SocketAddr),
+    /// A connection taken over by port interception. The backend sees the
+    /// client's address, but on a fresh port: the intercepted connection still
+    /// occupies the client's own one.
+    Intercepted(SocketAddr),
     /// The gateway itself: health checks and probes, which have no client to
     /// impersonate and always connect normally.
     Gateway,
@@ -122,7 +127,10 @@ pub async fn connect(
     let attempt = async {
         let stream = match origin {
             Origin::Client(client) if transparent::is_supported() => {
-                transparent::connect(backend, client).await?
+                transparent::connect(backend, client, true).await?
+            }
+            Origin::Intercepted(client) if transparent::is_supported() => {
+                transparent::connect(backend, client, false).await?
             }
             _ => TcpStream::connect(backend).await?,
         };
@@ -137,6 +145,20 @@ pub async fn connect(
         Ok(Err(source)) => Err(ConnectError::Io { address, source }),
         Err(_) => Err(ConnectError::Timeout { address, timeout }),
     }
+}
+
+/// Detects dead peers with TCP keepalives instead of an application timeout.
+///
+/// Intercepted connections belong to someone else's server, possibly speaking
+/// something other than Minecraft, so the gateway must not impose an idle limit
+/// of its own. Keepalives still reap connections whose peer vanished.
+pub fn enable_keepalive(stream: &TcpStream) -> io::Result<()> {
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(Duration::from_secs(60))
+        .with_interval(Duration::from_secs(10));
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let keepalive = keepalive.with_retries(6);
+    socket2::SockRef::from(stream).set_tcp_keepalive(&keepalive)
 }
 
 /// Fails fast at start-up if transparent sockets cannot be created.

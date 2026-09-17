@@ -1,0 +1,31 @@
+# mc-gateway on a hosting node: adds a line to the MOTD of every game server on
+# the node, and is otherwise invisible. See docs/hosting.md.
+
+intercept:
+  # Where the kernel hands intercepted connections over. Keep it on loopback and
+  # outside the port range below.
+  listen: "127.0.0.1:25500"
+  # The ports your panel allocates to customer servers.
+  ports: ["25565-25665"]
+
+motd:
+  # Replaces the second line of every customer's MOTD. Their first line, player
+  # count, version and icon stay their own.
+  line2: "&7Hosted by &bexample.net"
+  # line1: "..."    # also possible, but it is the customer's name for their server
+
+timeouts:
+  # How long to wait for a client to show whether it is a status ping. Anything
+  # undecided after this is passed through untouched.
+  handshake: 5s
+  connect: 3s
+  status: 10s
+
+metrics:
+  enabled: true
+  bind: "127.0.0.1:9100"
+
+log:
+  level: info
+  # Player addresses belong to your customers' players.
+  client_ip: false

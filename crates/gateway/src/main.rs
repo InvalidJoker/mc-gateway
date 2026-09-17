@@ -1,8 +1,8 @@
 //! mc-gateway — a Minecraft edge gateway.
 //!
-//! One public port in front of many backends: routing by the handshake
-//! hostname, a MOTD the gateway answers itself, and client IP forwarding that
-//! never asserts an identity it has not verified.
+//! Either one public port in front of many backends, routed by the handshake
+//! hostname, or — on a hosting node — an invisible layer in front of every
+//! game server on a port range that adds a line to their MOTD.
 
 use std::{path::PathBuf, process::ExitCode, sync::Arc};
 
@@ -27,6 +27,15 @@ struct Args {
     #[arg(long)]
     dump: bool,
 
+    /// Print the shell script that installs the firewall and routing rules
+    /// this configuration needs, then exit. Pipe it to `sh` as root.
+    #[arg(long)]
+    print_network_setup: bool,
+
+    /// Print the shell script that removes those rules again, then exit.
+    #[arg(long)]
+    print_network_teardown: bool,
+
     /// Override the log level (also honours RUST_LOG).
     #[arg(long)]
     log_level: Option<String>,
@@ -48,6 +57,22 @@ fn main() -> ExitCode {
     init_logging(&loaded.config, args.log_level.as_deref());
     for warning in &loaded.warnings {
         warn!("{warning}");
+    }
+
+    // Only the script goes to stdout: it is meant to be piped into a shell.
+    if args.print_network_setup {
+        let interception = loaded.config.intercept.as_ref().map(|intercept| {
+            mc_forwarding::netsetup::Interception {
+                listen: intercept.listen,
+                ports: intercept.ports.iter().map(|range| (range.start, range.end)).collect(),
+            }
+        });
+        print!("{}", mc_forwarding::netsetup::setup_script(interception.as_ref()));
+        return ExitCode::SUCCESS;
+    }
+    if args.print_network_teardown {
+        print!("{}", mc_forwarding::netsetup::teardown_script());
+        return ExitCode::SUCCESS;
     }
 
     if args.dump {
@@ -163,7 +188,8 @@ fn init_logging(config: &Config, level_override: Option<&str>) {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(format!("mc_gateway={level},mc_routing={level},mc_forwarding={level},warn")));
 
-    let builder = fmt().with_env_filter(filter).with_target(false);
+    // stderr, so that stdout stays clean for --print-network-setup and --dump.
+    let builder = fmt().with_env_filter(filter).with_target(false).with_writer(std::io::stderr);
     match config.log.format {
         LogFormat::Json => builder.json().init(),
         LogFormat::Text => builder.init(),

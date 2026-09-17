@@ -4,11 +4,13 @@
 //! combinations that parse fine but are almost certainly not what was meant
 //! (a group nothing routes to, a server no route can reach).
 
+pub mod intercept;
 pub mod model;
 pub mod net;
 
 use std::{collections::BTreeSet, path::Path};
 
+pub use intercept::{Intercept, PortRange};
 pub use ipnet::IpNet;
 pub use model::*;
 pub use net::IpNets;
@@ -81,12 +83,64 @@ impl Config {
         let mut errors = Vec::new();
         let mut warnings = Vec::new();
 
-        self.validate_listeners(&mut errors, &mut warnings);
-        self.validate_routing(&mut errors, &mut warnings);
-        self.validate_servers(&mut errors, &mut warnings);
+        self.validate_intercept(&mut errors, &mut warnings);
+        // A pure interception node has no routed listeners, and then routing
+        // and servers have nothing to be validated against.
+        if !self.listeners.is_empty() || self.intercept.is_none() {
+            self.validate_listeners(&mut errors, &mut warnings);
+            self.validate_routing(&mut errors, &mut warnings);
+            self.validate_servers(&mut errors, &mut warnings);
+        }
         self.validate_operational(&mut warnings);
 
         if errors.is_empty() { Ok(warnings) } else { Err(ConfigError::Invalid(errors)) }
+    }
+
+    fn validate_intercept(&self, errors: &mut Vec<String>, warnings: &mut Vec<String>) {
+        let Some(intercept) = &self.intercept else { return };
+
+        if intercept.ports.is_empty() {
+            errors.push("intercept.ports is empty".into());
+        }
+        if intercept.covers(intercept.listen.port()) {
+            errors.push(format!(
+                "intercept.listen port {} lies inside intercept.ports; connections would be \
+                 handed back to the gateway in a loop",
+                intercept.listen.port()
+            ));
+        }
+        if !intercept.listen.is_ipv4() {
+            errors.push("intercept.listen must be an IPv4 address".into());
+        }
+        for listener in &self.listeners {
+            if intercept.covers(listener.bind.port()) {
+                errors.push(format!(
+                    "listener `{}` binds port {}, which intercept.ports takes over",
+                    listener.name,
+                    listener.bind.port()
+                ));
+            }
+        }
+        for (index, range) in intercept.ports.iter().enumerate() {
+            for other in &intercept.ports[index + 1..] {
+                if range.overlaps(other) {
+                    warnings.push(format!("intercept.ports `{range}` and `{other}` overlap"));
+                }
+            }
+        }
+        if !self.motd.rewrites_anything() {
+            warnings.push(
+                "intercept is configured but motd.line1/line2 are not: every connection is \
+                 passed through untouched"
+                    .into(),
+            );
+        }
+        if !cfg!(target_os = "linux") {
+            warnings.push(
+                "intercept needs Linux TPROXY; this build can validate the config but not run it"
+                    .into(),
+            );
+        }
     }
 
     fn validate_listeners(&self, errors: &mut Vec<String>, warnings: &mut Vec<String>) {
@@ -450,6 +504,51 @@ servers:
         let effective = config.motd.overlay(config.routing.rules[0].motd.as_ref());
         assert_eq!(effective.line2.as_deref(), Some("&6modded only"));
         assert_eq!(effective.line1.as_deref(), Some("&bglobal"), "unset fields fall back");
+    }
+
+    const INTERCEPT_ONLY: &str = r#"
+intercept:
+  ports: ["30000-40000"]
+motd:
+  line2: "&7Hosted by example.net"
+"#;
+
+    #[test]
+    fn an_intercept_only_config_needs_no_routing() {
+        let loaded = load(INTERCEPT_ONLY).unwrap();
+        let intercept = loaded.config.intercept.unwrap();
+        assert!(intercept.covers(30123));
+        assert!(loaded.config.listeners.is_empty());
+    }
+
+    #[test]
+    fn rejects_an_intercept_listener_inside_its_own_range() {
+        let raw = INTERCEPT_ONLY.replace("intercept:\n", "intercept:\n  listen: \"127.0.0.1:30500\"\n");
+        let err = load(&raw).unwrap_err();
+        assert!(err.to_string().contains("in a loop"), "{err}");
+    }
+
+    #[test]
+    fn warns_when_nothing_would_be_rewritten() {
+        let loaded = load("intercept:\n  ports: [30000]\n").unwrap();
+        assert!(loaded.warnings.iter().any(|w| w.contains("passed through untouched")));
+    }
+
+    #[test]
+    fn an_empty_config_is_still_rejected() {
+        assert!(load("motd:\n  line2: x\n").is_err());
+    }
+
+    #[test]
+    fn the_shipped_node_config_is_valid() {
+        let raw = include_str!("../../../deploy/node/config.yaml");
+        let loaded = Config::parse(raw, "deploy/node/config.yaml").expect("node config loads");
+        let intercept = loaded.config.intercept.expect("an interception config");
+        assert!(intercept.covers(25565));
+        assert!(loaded.config.motd.line2.is_some());
+        let unexpected: Vec<_> =
+            loaded.warnings.iter().filter(|w| !w.contains("needs Linux")).collect();
+        assert!(unexpected.is_empty(), "{unexpected:?}");
     }
 
     #[test]

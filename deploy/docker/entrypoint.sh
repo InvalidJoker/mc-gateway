@@ -1,8 +1,9 @@
 #!/bin/sh
 # Container entrypoint.
 #
-# Starts as root only long enough to set up the TPROXY return path in the
-# container's own network namespace, then drops to the unprivileged
+# Starts as root only long enough to install the firewall and routing rules the
+# config needs (in the container's network namespace, or the host's when run
+# with host networking), then drops to the unprivileged
 # `mc-gateway` user, keeping exactly one capability: CAP_NET_ADMIN.
 #
 # `USER` in the Dockerfile cannot do this. A non-root user gets no effective
@@ -27,7 +28,10 @@ MSG
 fi
 
 if [ "${MC_GATEWAY_TPROXY_SETUP:-1}" = "1" ]; then
-    /usr/local/lib/mc-gateway/tproxy-setup.sh
+    # The gateway generates the rules from its own config, so the port range and
+    # the marks cannot drift apart. Captured first, so a config error stops here.
+    setup=$(/usr/local/bin/mc-gateway "$@" --print-network-setup)
+    printf '%s\n' "$setup" | sh
 fi
 
 exec setpriv \

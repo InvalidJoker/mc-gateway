@@ -8,14 +8,14 @@ RUN cargo build --release --locked -p mc-gateway
 # Run
 FROM debian:trixie-slim
 
-# iproute2 and nftables set up the TPROXY return path at start-up.
+# iproute2, nftables and iptables apply the rules `mc-gateway --print-network-setup`
+# generates.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends iproute2 nftables \
+    && apt-get install -y --no-install-recommends iproute2 nftables iptables \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --no-create-home --shell /usr/sbin/nologin mc-gateway
 
 COPY --from=build /src/target/release/mc-gateway /usr/local/bin/mc-gateway
-COPY deploy/nftables/tproxy-setup.sh deploy/nftables/tproxy.nft /usr/local/lib/mc-gateway/
 COPY deploy/docker/entrypoint.sh /usr/local/bin/entrypoint
 
 EXPOSE 25565 9100
