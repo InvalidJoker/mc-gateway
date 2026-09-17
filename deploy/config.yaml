@@ -1,0 +1,29 @@
+# mc-gateway — adds a line to the MOTD of every Minecraft server on this node.
+# Full explanation: docs/deployment.md
+
+# The ports your panel hands out to customer servers.
+ports: ["25565-25665"]
+
+# Where the kernel delivers intercepted connections. Loopback, outside `ports`.
+listen: "127.0.0.1:25500"
+listen_v6: "[::1]:25500"        # null: leave IPv6 connections alone
+
+motd:
+  # Replaces the second line of every server's MOTD. The customer's first line,
+  # player count, version and icon stay theirs. `&` colour codes work.
+  line2: "&7Hosted by &bexample.net"
+
+timeouts:
+  handshake: 5s    # undecided connections are passed through after this
+  status: 10s
+  connect: 3s
+  drain: 30s       # grace period for open connections on shutdown
+
+metrics:
+  enabled: true
+  bind: "127.0.0.1:9100"
+
+log:
+  level: info
+  format: text     # text | json
+  client_ip: false # player addresses are your customers' data
