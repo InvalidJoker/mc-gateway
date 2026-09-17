@@ -148,9 +148,8 @@ echo
 echo "== teardown =="
 node docker stop gateway >/dev/null
 # Run inside the gateway image, which has nft and ip; the node image has not.
-node docker run --rm --network host --cap-add NET_ADMIN --entrypoint sh \
-    -v /lab/gateway.yaml:/c.yaml:ro mc-gateway:dev \
-    -c 'mc-gateway --config /c.yaml --print-network-teardown 2>/dev/null | sh'
+node docker run --rm --network host --cap-add NET_ADMIN --entrypoint sh mc-gateway:dev \
+    -c 'mc-gateway --print-network-teardown | sh'
 tables=$(node docker run --rm --network host --cap-add NET_ADMIN --entrypoint nft mc-gateway:dev list tables 2>&1)
 expect "the node's firewall is readable" "$tables" "table ip"
 reject "rules are gone"                  "$tables" "mcgateway"

@@ -1,5 +1,2 @@
 /target
-/test-infra/**/data
-/test-infra/**/logs
-*.log
 .idea/

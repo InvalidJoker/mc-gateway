@@ -31,6 +31,12 @@ struct Args {
 fn main() -> ExitCode {
     let args = Args::parse();
 
+    // Removing the rules must work even when the config is gone or broken.
+    if args.print_network_teardown {
+        print!("{}", netsetup::teardown_script());
+        return ExitCode::SUCCESS;
+    }
+
     let loaded = match Config::load(&args.config) {
         Ok(loaded) => loaded,
         Err(err) => {
@@ -47,10 +53,6 @@ fn main() -> ExitCode {
     // Scripts go to stdout on their own, so they can be piped into a shell.
     if args.print_network_setup {
         print!("{}", netsetup::setup_script(&loaded.config));
-        return ExitCode::SUCCESS;
-    }
-    if args.print_network_teardown {
-        print!("{}", netsetup::teardown_script());
         return ExitCode::SUCCESS;
     }
     if args.check {
