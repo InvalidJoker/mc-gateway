@@ -13,7 +13,11 @@ use tokio::{net::TcpStream, time};
 ///
 /// On other platforms this is an ordinary connection, which is enough for the
 /// tests to run anywhere.
-pub async fn connect(server: SocketAddr, client: SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
+pub async fn connect(
+    server: SocketAddr,
+    client: SocketAddr,
+    timeout: Duration,
+) -> io::Result<TcpStream> {
     let attempt = async {
         #[cfg(target_os = "linux")]
         let stream = connect_as(server, client).await?;
@@ -137,7 +141,10 @@ pub fn preflight() -> io::Result<()> {
 
 /// Makes the client address usable as a bind address for a socket of the
 /// backend's family.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code, reason = "only the Linux path binds"))]
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(dead_code, reason = "only the Linux path binds")
+)]
 fn match_family(client: SocketAddr, backend: SocketAddr) -> io::Result<SocketAddr> {
     use std::net::IpAddr;
 
@@ -152,9 +159,10 @@ fn match_family(client: SocketAddr, backend: SocketAddr) -> io::Result<SocketAdd
     match (client.ip(), backend.ip()) {
         (IpAddr::V4(_), IpAddr::V4(_)) | (IpAddr::V6(_), IpAddr::V6(_)) => Ok(client),
         // A v4 client can still be expressed on a v6 socket.
-        (IpAddr::V4(v4), IpAddr::V6(_)) => {
-            Ok(SocketAddr::new(IpAddr::V6(v4.to_ipv6_mapped()), client.port()))
-        }
+        (IpAddr::V4(v4), IpAddr::V6(_)) => Ok(SocketAddr::new(
+            IpAddr::V6(v4.to_ipv6_mapped()),
+            client.port(),
+        )),
         // A v6 client cannot be expressed as v4 at all.
         (IpAddr::V6(_), IpAddr::V4(_)) => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -176,7 +184,8 @@ mod tests {
 
     #[test]
     fn unmaps_v4_clients_for_v4_backends() {
-        let bound = match_family(addr("[::ffff:203.0.113.7]:51234"), addr("10.0.0.1:25565")).unwrap();
+        let bound =
+            match_family(addr("[::ffff:203.0.113.7]:51234"), addr("10.0.0.1:25565")).unwrap();
         assert_eq!(bound, addr("203.0.113.7:51234"));
     }
 

@@ -1,11 +1,6 @@
 //! Starting, reloading and stopping the gateway.
 
-use std::{
-    net::SocketAddr,
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use arc_swap::ArcSwap;
 use tokio::{
@@ -31,7 +26,11 @@ pub struct Gateway {
 impl Gateway {
     pub fn new(config: Config, config_path: PathBuf) -> Arc<Self> {
         let (shutdown, _) = watch::channel(false);
-        Arc::new(Self { config: ArcSwap::from_pointee(config), config_path, shutdown })
+        Arc::new(Self {
+            config: ArcSwap::from_pointee(config),
+            config_path,
+            shutdown,
+        })
     }
 
     pub fn config(&self) -> Arc<Config> {
@@ -40,7 +39,11 @@ impl Gateway {
 
     /// Renders a player address for logs, honouring `log.client_ip`.
     pub fn log_addr(&self, addr: SocketAddr) -> String {
-        if self.config.load().log.client_ip { addr.to_string() } else { "redacted".to_owned() }
+        if self.config.load().log.client_ip {
+            addr.to_string()
+        } else {
+            "redacted".to_owned()
+        }
     }
 
     /// Re-reads the config file. The MOTD lines, timeouts and log settings take
@@ -124,7 +127,13 @@ pub async fn start(loaded: Loaded, config_path: PathBuf) -> Result<Running, Stri
         })
         .collect();
 
-    Ok(Running { gateway, listeners, sessions: Some(sessions), sessions_done, drain })
+    Ok(Running {
+        gateway,
+        listeners,
+        sessions: Some(sessions),
+        sessions_done,
+        drain,
+    })
 }
 
 impl Running {

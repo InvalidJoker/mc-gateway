@@ -13,11 +13,26 @@ pub fn install(bind: SocketAddr) -> Result<(), String> {
         .map_err(|err| format!("cannot start the metrics endpoint on {bind}: {err}"))?;
 
     describe_counter!("mc_gateway_connections_total", "Intercepted connections");
-    describe_gauge!("mc_gateway_connections_active", "Intercepted connections currently open");
-    describe_counter!("mc_gateway_status_requests_total", "Status pings recognised");
-    describe_counter!("mc_gateway_motd_rewrites_total", "Status responses that got the MOTD line");
-    describe_counter!("mc_gateway_server_unreachable_total", "Connections whose server did not answer");
-    describe_counter!("mc_gateway_offline_answers_total", "Offline MOTDs and kicks sent for unreachable servers");
+    describe_gauge!(
+        "mc_gateway_connections_active",
+        "Intercepted connections currently open"
+    );
+    describe_counter!(
+        "mc_gateway_status_requests_total",
+        "Status pings recognised"
+    );
+    describe_counter!(
+        "mc_gateway_motd_rewrites_total",
+        "Status responses that got the MOTD line"
+    );
+    describe_counter!(
+        "mc_gateway_server_unreachable_total",
+        "Connections whose server did not answer"
+    );
+    describe_counter!(
+        "mc_gateway_offline_answers_total",
+        "Offline MOTDs and kicks sent for unreachable servers"
+    );
     Ok(())
 }
 

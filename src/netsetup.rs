@@ -137,7 +137,10 @@ pub fn ruleset(config: &Config) -> String {
     let mut out = String::new();
     // Declared and flushed first, so loading this twice does not duplicate
     // rules.
-    let _ = writeln!(out, "table inet {NFT_TABLE}\nflush table inet {NFT_TABLE}\n");
+    let _ = writeln!(
+        out,
+        "table inet {NFT_TABLE}\nflush table inet {NFT_TABLE}\n"
+    );
     let _ = write!(
         out,
         r#"table inet {NFT_TABLE} {{
@@ -153,7 +156,12 @@ pub fn ruleset(config: &Config) -> String {
     );
 
     {
-        let ports = config.ports.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+        let ports = config
+            .ports
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
         let _ = write!(
             out,
             r#"
@@ -203,19 +211,37 @@ mod tests {
     use super::*;
 
     fn node(extra: &str) -> Config {
-        Config::parse(&format!("ports: [\"30000-40000\", 25565]\nmotd: {{line2: x}}\n{extra}"), "test")
-            .unwrap()
-            .config
+        Config::parse(
+            &format!("ports: [\"30000-40000\", 25565]\nmotd: {{line2: x}}\n{extra}"),
+            "test",
+        )
+        .unwrap()
+        .config
     }
 
     #[test]
     fn interception_covers_both_families() {
         let rules = ruleset(&node(""));
-        assert!(rules.contains("tcp dport { 30000-40000, 25565 }"), "{rules}");
-        assert!(rules.contains("meta nfproto ipv4 tproxy ip to 127.0.0.1:25500"), "{rules}");
-        assert!(rules.contains("meta nfproto ipv6 tproxy ip6 to [::1]:25500"), "{rules}");
-        assert!(rules.contains("ct state new"), "only new connections are diverted");
-        assert!(rules.contains("iifname != \"lo\""), "the gateway must not intercept itself");
+        assert!(
+            rules.contains("tcp dport { 30000-40000, 25565 }"),
+            "{rules}"
+        );
+        assert!(
+            rules.contains("meta nfproto ipv4 tproxy ip to 127.0.0.1:25500"),
+            "{rules}"
+        );
+        assert!(
+            rules.contains("meta nfproto ipv6 tproxy ip6 to [::1]:25500"),
+            "{rules}"
+        );
+        assert!(
+            rules.contains("ct state new"),
+            "only new connections are diverted"
+        );
+        assert!(
+            rules.contains("iifname != \"lo\""),
+            "the gateway must not intercept itself"
+        );
     }
 
     #[test]
@@ -231,8 +257,14 @@ mod tests {
         let (prerouting, output) = rules.split_at(rules.find("chain output").unwrap());
         let steer = "ct mark 0x6d65 ct direction reply meta mark set 0x6d67";
         assert!(prerouting.contains(steer), "replies via a bridge:\n{rules}");
-        assert!(output.contains(steer), "replies from docker-proxy or a host process:\n{rules}");
-        assert!(output.contains("meta mark 0x6d64 ct mark set 0x6d65"), "{rules}");
+        assert!(
+            output.contains(steer),
+            "replies from docker-proxy or a host process:\n{rules}"
+        );
+        assert!(
+            output.contains("meta mark 0x6d64 ct mark set 0x6d65"),
+            "{rules}"
+        );
     }
 
     #[test]
@@ -253,10 +285,16 @@ mod tests {
         let teardown = teardown_script();
         for needle in ["fwmark 0x6d67 lookup 6767", "table 6767", "ip -6 rule"] {
             assert!(setup.contains(needle), "setup lacks {needle}:\n{setup}");
-            assert!(teardown.contains(needle), "teardown lacks {needle}:\n{teardown}");
+            assert!(
+                teardown.contains(needle),
+                "teardown lacks {needle}:\n{teardown}"
+            );
         }
         assert!(setup.contains("allow_input iptables") && setup.contains("allow_input ip6tables"));
         assert!(teardown.contains("-D INPUT -m mark --mark 0x6d67 -j ACCEPT"));
-        assert!(teardown.contains("command -v"), "a missing nft must not pass silently");
+        assert!(
+            teardown.contains("command -v"),
+            "a missing nft must not pass silently"
+        );
     }
 }

@@ -100,7 +100,9 @@ impl<'a> Reader<'a> {
     }
 
     pub fn i64(&mut self) -> Result<i64> {
-        Ok(i64::from_be_bytes(self.take(8)?.try_into().expect("8 bytes")))
+        Ok(i64::from_be_bytes(
+            self.take(8)?.try_into().expect("8 bytes"),
+        ))
     }
 
     /// Length-prefixed UTF-8 string of at most `max_chars` characters.
@@ -111,11 +113,17 @@ impl<'a> Reader<'a> {
         }
         let len = len as usize;
         if len > max_chars * 4 {
-            return Err(Error::StringTooLong { max: max_chars * 4, actual: len });
+            return Err(Error::StringTooLong {
+                max: max_chars * 4,
+                actual: len,
+            });
         }
         let s = std::str::from_utf8(self.take(len)?).map_err(|_| Error::InvalidUtf8)?;
         if s.chars().count() > max_chars {
-            return Err(Error::StringTooLong { max: max_chars, actual: s.chars().count() });
+            return Err(Error::StringTooLong {
+                max: max_chars,
+                actual: s.chars().count(),
+            });
         }
         Ok(s.to_owned())
     }
@@ -197,7 +205,10 @@ pub fn decode_frame_limited(buf: &[u8], max_size: usize) -> Result<Frame<'_>> {
     }
     let length = length as usize;
     if length > max_size {
-        return Err(Error::PacketTooLarge { max: max_size, actual: length });
+        return Err(Error::PacketTooLarge {
+            max: max_size,
+            actual: length,
+        });
     }
     if buf.len() < pos + length {
         return Err(Error::Incomplete);
@@ -205,7 +216,11 @@ pub fn decode_frame_limited(buf: &[u8], max_size: usize) -> Result<Frame<'_>> {
     let payload = &buf[pos..pos + length];
     let mut id_pos = 0usize;
     let id = read_varint(payload, &mut id_pos)?;
-    Ok(Frame { id, body: &payload[id_pos..], total_len: pos + length })
+    Ok(Frame {
+        id,
+        body: &payload[id_pos..],
+        total_len: pos + length,
+    })
 }
 
 /// `len(id + body) | id | body`
@@ -264,7 +279,10 @@ pub struct Handshake {
 impl Handshake {
     pub fn decode(frame: &Frame<'_>) -> Result<Self> {
         if frame.id != HANDSHAKE_ID {
-            return Err(Error::UnexpectedPacket { expected: HANDSHAKE_ID, actual: frame.id });
+            return Err(Error::UnexpectedPacket {
+                expected: HANDSHAKE_ID,
+                actual: frame.id,
+            });
         }
         let mut r = frame.reader();
         Ok(Self {
@@ -337,7 +355,11 @@ mod tests {
     fn every_partial_frame_is_incomplete() {
         let full = encode_packet(0x00, &[0xaa; 40]);
         for cut in 0..full.len() {
-            assert_eq!(decode_frame(&full[..cut]), Err(Error::Incomplete), "cut at {cut}");
+            assert_eq!(
+                decode_frame(&full[..cut]),
+                Err(Error::Incomplete),
+                "cut at {cut}"
+            );
         }
         assert_eq!(decode_frame(&full).unwrap().total_len, full.len());
     }
@@ -346,7 +368,10 @@ mod tests {
     fn a_declared_length_bomb_is_refused_without_allocating() {
         let mut buf = Vec::new();
         write_varint(&mut buf, 10 * 1024 * 1024);
-        assert!(matches!(decode_frame(&buf), Err(Error::PacketTooLarge { .. })));
+        assert!(matches!(
+            decode_frame(&buf),
+            Err(Error::PacketTooLarge { .. })
+        ));
     }
 
     #[test]
@@ -359,7 +384,10 @@ mod tests {
                 next_state,
             };
             let bytes = handshake.encode();
-            assert_eq!(Handshake::decode(&decode_frame(&bytes).unwrap()).unwrap(), handshake);
+            assert_eq!(
+                Handshake::decode(&decode_frame(&bytes).unwrap()).unwrap(),
+                handshake
+            );
         }
     }
 
@@ -368,7 +396,10 @@ mod tests {
         let mut w = Writer::new();
         w.varint(767).string("x").u16(1).varint(9);
         let bytes = encode_packet(HANDSHAKE_ID, w.as_slice());
-        assert_eq!(Handshake::decode(&decode_frame(&bytes).unwrap()), Err(Error::UnknownNextState(9)));
+        assert_eq!(
+            Handshake::decode(&decode_frame(&bytes).unwrap()),
+            Err(Error::UnknownNextState(9))
+        );
     }
 
     #[test]
@@ -376,6 +407,9 @@ mod tests {
         let packet = encode_status_response(r#"{"description":"hi"}"#);
         let frame = decode_frame(&packet).unwrap();
         assert_eq!(frame.id, STATUS_RESPONSE_ID);
-        assert_eq!(frame.reader().string(1000).unwrap(), r#"{"description":"hi"}"#);
+        assert_eq!(
+            frame.reader().string(1000).unwrap(),
+            r#"{"description":"hi"}"#
+        );
     }
 }

@@ -92,7 +92,10 @@ mod tests {
     }"#;
 
     fn motd(line1: Option<&str>, line2: Option<&str>) -> Motd {
-        Motd { line1: line1.map(str::to_owned), line2: line2.map(str::to_owned) }
+        Motd {
+            line1: line1.map(str::to_owned),
+            line2: line2.map(str::to_owned),
+        }
     }
 
     fn description_text(json: &str) -> String {
@@ -171,7 +174,10 @@ mod tests {
         let offline = Offline::default();
         let value: Value =
             serde_json::from_str(&offline_status(&offline, &motd(None, Some("&7ad")))).unwrap();
-        assert_eq!(value["description"]["text"], "\u{a7}cThis server is offline\n\u{a7}7ad");
+        assert_eq!(
+            value["description"]["text"],
+            "\u{a7}cThis server is offline\n\u{a7}7ad"
+        );
         assert_eq!(value["version"]["name"], "\u{a7}cOffline");
         assert_eq!(value["version"]["protocol"], -1);
         assert_eq!(value["players"]["online"], 0);
@@ -179,14 +185,27 @@ mod tests {
 
     #[test]
     fn without_motd_lines_the_offline_text_is_used_as_is() {
-        let offline = Offline { motd: "&cdown\n&7for maintenance".into(), ..Offline::default() };
-        let value: Value = serde_json::from_str(&offline_status(&offline, &motd(None, None))).unwrap();
-        assert_eq!(value["description"]["text"], "\u{a7}cdown\n\u{a7}7for maintenance");
+        let offline = Offline {
+            motd: "&cdown\n&7for maintenance".into(),
+            ..Offline::default()
+        };
+        let value: Value =
+            serde_json::from_str(&offline_status(&offline, &motd(None, None))).unwrap();
+        assert_eq!(
+            value["description"]["text"],
+            "\u{a7}cdown\n\u{a7}7for maintenance"
+        );
     }
 
     #[test]
     fn a_response_that_is_not_json_is_left_to_the_client() {
-        assert_eq!(rewrite_status("not json at all", &motd(None, Some("x"))), None);
-        assert_eq!(rewrite_status(r#"{"players":{}}"#, &motd(None, Some("x"))), None);
+        assert_eq!(
+            rewrite_status("not json at all", &motd(None, Some("x"))),
+            None
+        );
+        assert_eq!(
+            rewrite_status(r#"{"players":{}}"#, &motd(None, Some("x"))),
+            None
+        );
     }
 }

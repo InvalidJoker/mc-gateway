@@ -44,22 +44,36 @@ async fn node(gateway: Arc<Gateway>, server: SocketAddr) -> SocketAddr {
     tokio::spawn(async move {
         loop {
             let (stream, peer) = listener.accept().await.unwrap();
-            tokio::spawn(intercept::handle(stream, peer, server, Arc::clone(&gateway)));
+            tokio::spawn(intercept::handle(
+                stream,
+                peer,
+                server,
+                Arc::clone(&gateway),
+            ));
         }
     });
     address
 }
 
 fn gateway(config: &str) -> Arc<Gateway> {
-    Gateway::new(Config::parse(config, "test").unwrap().config, PathBuf::from("test.yaml"))
+    Gateway::new(
+        Config::parse(config, "test").unwrap().config,
+        PathBuf::from("test.yaml"),
+    )
 }
 
 /// A status ping the way the real client sends it: handshake, pause, request.
 async fn status_ping(address: SocketAddr) -> serde_json::Value {
     let mut stream = TcpStream::connect(address).await.unwrap();
-    stream.write_all(&handshake(NextState::Status)).await.unwrap();
+    stream
+        .write_all(&handshake(NextState::Status))
+        .await
+        .unwrap();
     time::sleep(Duration::from_millis(50)).await;
-    stream.write_all(&encode_packet(STATUS_REQUEST_ID, &[])).await.unwrap();
+    stream
+        .write_all(&encode_packet(STATUS_REQUEST_ID, &[]))
+        .await
+        .unwrap();
 
     let (_, body) = time::timeout(Duration::from_secs(5), read_packet(&mut stream))
         .await
@@ -70,8 +84,11 @@ async fn status_ping(address: SocketAddr) -> serde_json::Value {
 
 #[tokio::test]
 async fn the_ad_replaces_line_two_and_nothing_else() {
-    let customer =
-        FakeServer::start(Behaviour::Status(paper_status("Steve's SMP\\nwhitelist on", 4))).await;
+    let customer = FakeServer::start(Behaviour::Status(paper_status(
+        "Steve's SMP\\nwhitelist on",
+        4,
+    )))
+    .await;
     let address = node(gateway(WITH_AD), customer.address).await;
 
     let status = status_ping(address).await;
@@ -90,8 +107,14 @@ async fn without_an_ad_the_response_is_byte_identical() {
     let address = node(gateway(WITHOUT_AD), customer.address).await;
 
     let mut stream = TcpStream::connect(address).await.unwrap();
-    stream.write_all(&handshake(NextState::Status)).await.unwrap();
-    stream.write_all(&encode_packet(STATUS_REQUEST_ID, &[])).await.unwrap();
+    stream
+        .write_all(&handshake(NextState::Status))
+        .await
+        .unwrap();
+    stream
+        .write_all(&encode_packet(STATUS_REQUEST_ID, &[]))
+        .await
+        .unwrap();
     let (_, body) = read_packet(&mut stream).await.unwrap();
 
     assert_eq!(Reader::new(&body).string(1 << 20).unwrap(), json);
@@ -112,7 +135,10 @@ async fn a_login_reaches_the_server_verbatim() {
 
     stream.write_all(b"play").await.unwrap();
     let mut echoed = [0u8; 4];
-    time::timeout(Duration::from_secs(5), stream.read_exact(&mut echoed)).await.unwrap().unwrap();
+    time::timeout(Duration::from_secs(5), stream.read_exact(&mut echoed))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(&echoed, b"play");
 }
 
@@ -164,7 +190,11 @@ async fn a_pre_1_7_ping_passes_through() {
 }
 
 async fn stopped_server() -> SocketAddr {
-    TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap()
+    TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap()
+        .local_addr()
+        .unwrap()
 }
 
 #[tokio::test]
@@ -177,13 +207,17 @@ async fn a_stopped_server_is_shown_offline_with_the_node_line() {
         "\u{a7}cThis server is offline\n\u{a7}7Hosted by \u{a7}bexample.net"
     );
     assert_eq!(status["version"]["name"], "\u{a7}cOffline");
-    assert_eq!(status["version"]["protocol"], -1, "drawn as text instead of ping bars");
+    assert_eq!(
+        status["version"]["protocol"], -1,
+        "drawn as text instead of ping bars"
+    );
     assert_eq!(status["players"]["online"], 0);
 }
 
 #[tokio::test]
 async fn the_offline_text_comes_from_the_config() {
-    let config = format!("{WITH_AD}offline:\n  motd: \"&eServer is sleeping\"\n  version: \"&eZzz\"\n");
+    let config =
+        format!("{WITH_AD}offline:\n  motd: \"&eServer is sleeping\"\n  version: \"&eZzz\"\n");
     let address = node(gateway(&config), stopped_server().await).await;
 
     let status = status_ping(address).await;
@@ -197,13 +231,22 @@ async fn an_offline_server_answers_the_latency_ping() {
     let address = node(gateway(WITH_AD), stopped_server().await).await;
 
     let mut stream = TcpStream::connect(address).await.unwrap();
-    stream.write_all(&handshake(NextState::Status)).await.unwrap();
-    stream.write_all(&encode_packet(STATUS_REQUEST_ID, &[])).await.unwrap();
+    stream
+        .write_all(&handshake(NextState::Status))
+        .await
+        .unwrap();
+    stream
+        .write_all(&encode_packet(STATUS_REQUEST_ID, &[]))
+        .await
+        .unwrap();
     read_packet(&mut stream).await.expect("offline status");
 
     let mut ping = Writer::new();
     ping.i64(42);
-    stream.write_all(&encode_packet(PING_ID, ping.as_slice())).await.unwrap();
+    stream
+        .write_all(&encode_packet(PING_ID, ping.as_slice()))
+        .await
+        .unwrap();
     let (id, body) = read_packet(&mut stream).await.expect("pong");
     assert_eq!(id, PING_ID);
     assert_eq!(Reader::new(&body).i64().unwrap(), 42);
@@ -222,7 +265,10 @@ async fn joining_an_offline_server_shows_the_kick_message() {
     assert_eq!(id, 0x00);
     let reason: serde_json::Value =
         serde_json::from_str(&Reader::new(&body).string(262_144).unwrap()).unwrap();
-    assert!(reason["text"].as_str().unwrap().contains("offline"), "{reason}");
+    assert!(
+        reason["text"].as_str().unwrap().contains("offline"),
+        "{reason}"
+    );
 }
 
 #[tokio::test]
@@ -236,7 +282,10 @@ async fn the_kick_message_can_be_turned_off() {
     stream.write_all(&join).await.unwrap();
 
     let mut buf = Vec::new();
-    time::timeout(Duration::from_secs(3), stream.read_to_end(&mut buf)).await.expect("closed").ok();
+    time::timeout(Duration::from_secs(3), stream.read_to_end(&mut buf))
+        .await
+        .expect("closed")
+        .ok();
     assert!(buf.is_empty(), "closed without a message");
 }
 
@@ -246,10 +295,19 @@ async fn with_offline_answers_disabled_a_stopped_server_is_a_closed_port() {
     let address = node(gateway(&config), stopped_server().await).await;
 
     let mut stream = TcpStream::connect(address).await.unwrap();
-    stream.write_all(&handshake(NextState::Status)).await.unwrap();
-    stream.write_all(&encode_packet(STATUS_REQUEST_ID, &[])).await.unwrap();
+    stream
+        .write_all(&handshake(NextState::Status))
+        .await
+        .unwrap();
+    stream
+        .write_all(&encode_packet(STATUS_REQUEST_ID, &[]))
+        .await
+        .unwrap();
     let mut buf = Vec::new();
-    time::timeout(Duration::from_secs(3), stream.read_to_end(&mut buf)).await.expect("closed promptly").ok();
+    time::timeout(Duration::from_secs(3), stream.read_to_end(&mut buf))
+        .await
+        .expect("closed promptly")
+        .ok();
     assert!(buf.is_empty(), "nothing invented");
 }
 
@@ -260,8 +318,14 @@ async fn something_that_is_not_minecraft_on_an_offline_port_just_closes() {
     let mut stream = TcpStream::connect(address).await.unwrap();
     stream.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
     let mut buf = Vec::new();
-    time::timeout(Duration::from_secs(3), stream.read_to_end(&mut buf)).await.expect("closed promptly").ok();
-    assert!(buf.is_empty(), "no Minecraft answer to a non-Minecraft client");
+    time::timeout(Duration::from_secs(3), stream.read_to_end(&mut buf))
+        .await
+        .expect("closed promptly")
+        .ok();
+    assert!(
+        buf.is_empty(),
+        "no Minecraft answer to a non-Minecraft client"
+    );
 }
 
 #[tokio::test]
@@ -275,12 +339,18 @@ async fn a_modpack_sized_status_response_still_gets_the_ad() {
             "description":{{"text":"Modpack"}},"modinfo":{{"type":"FML","modList":[{}]}}}}"#,
         mods.join(",")
     );
-    assert!(json.len() > 256 * 1024, "the test needs a response over the old limit");
+    assert!(
+        json.len() > 256 * 1024,
+        "the test needs a response over the old limit"
+    );
     let customer = FakeServer::start(Behaviour::Status(json)).await;
     let address = node(gateway(WITH_AD), customer.address).await;
 
     let status = status_ping(address).await;
-    assert_eq!(status["description"]["text"], "Modpack\n\u{a7}7Hosted by \u{a7}bexample.net");
+    assert_eq!(
+        status["description"]["text"],
+        "Modpack\n\u{a7}7Hosted by \u{a7}bexample.net"
+    );
     assert_eq!(status["modinfo"]["modList"].as_array().unwrap().len(), 6000);
 }
 
@@ -290,10 +360,19 @@ async fn an_unparseable_status_response_is_forwarded_as_is() {
     let address = node(gateway(WITH_AD), customer.address).await;
 
     let mut stream = TcpStream::connect(address).await.unwrap();
-    stream.write_all(&handshake(NextState::Status)).await.unwrap();
-    stream.write_all(&encode_packet(STATUS_REQUEST_ID, &[])).await.unwrap();
+    stream
+        .write_all(&handshake(NextState::Status))
+        .await
+        .unwrap();
+    stream
+        .write_all(&encode_packet(STATUS_REQUEST_ID, &[]))
+        .await
+        .unwrap();
     let (_, body) = read_packet(&mut stream).await.unwrap();
-    assert_eq!(Reader::new(&body).string(1 << 20).unwrap(), "definitely not json");
+    assert_eq!(
+        Reader::new(&body).string(1 << 20).unwrap(),
+        "definitely not json"
+    );
 }
 
 #[tokio::test]
@@ -302,13 +381,22 @@ async fn the_latency_ping_after_the_ad_still_works() {
     let address = node(gateway(WITH_AD), customer.address).await;
 
     let mut stream = TcpStream::connect(address).await.unwrap();
-    stream.write_all(&handshake(NextState::Status)).await.unwrap();
-    stream.write_all(&encode_packet(STATUS_REQUEST_ID, &[])).await.unwrap();
+    stream
+        .write_all(&handshake(NextState::Status))
+        .await
+        .unwrap();
+    stream
+        .write_all(&encode_packet(STATUS_REQUEST_ID, &[]))
+        .await
+        .unwrap();
     read_packet(&mut stream).await.expect("status response");
 
     let mut ping = Writer::new();
     ping.i64(987_654_321);
-    stream.write_all(&encode_packet(PING_ID, ping.as_slice())).await.unwrap();
+    stream
+        .write_all(&encode_packet(PING_ID, ping.as_slice()))
+        .await
+        .unwrap();
     let (id, body) = read_packet(&mut stream).await.expect("pong");
     assert_eq!(id, PING_ID);
     assert_eq!(Reader::new(&body).i64().unwrap(), 987_654_321);
@@ -324,19 +412,40 @@ async fn a_reload_changes_the_line_for_new_pings() {
     let gateway = Gateway::new(Config::load(&path).unwrap().config, path.clone());
     let customer = FakeServer::start(Behaviour::Status(paper_status("Steve's SMP", 1))).await;
     let address = node(Arc::clone(&gateway), customer.address).await;
-    assert!(status_ping(address).await["description"]["text"].as_str().unwrap().contains("example.net"));
+    assert!(
+        status_ping(address).await["description"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("example.net")
+    );
 
     std::fs::write(&path, WITH_AD.replace("example.net", "other.example")).unwrap();
     let warnings = gateway.reload().unwrap();
-    assert!(!warnings.iter().any(|w| w.contains("restart")), "{warnings:?}");
-    assert!(status_ping(address).await["description"]["text"].as_str().unwrap().contains("other.example"));
+    assert!(
+        !warnings.iter().any(|w| w.contains("restart")),
+        "{warnings:?}"
+    );
+    assert!(
+        status_ping(address).await["description"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("other.example")
+    );
 
     std::fs::write(&path, WITH_AD.replace("30000-40000", "30000-30500")).unwrap();
     let warnings = gateway.reload().unwrap();
-    assert!(warnings.iter().any(|w| w.contains("restart")), "a port change needs a restart: {warnings:?}");
+    assert!(
+        warnings.iter().any(|w| w.contains("restart")),
+        "a port change needs a restart: {warnings:?}"
+    );
 
     std::fs::write(&path, "ports: [").unwrap();
     assert!(gateway.reload().is_err(), "a broken file is rejected");
-    assert!(status_ping(address).await["description"]["text"].as_str().is_some(), "and the gateway keeps working");
+    assert!(
+        status_ping(address).await["description"]["text"]
+            .as_str()
+            .is_some(),
+        "and the gateway keeps working"
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }

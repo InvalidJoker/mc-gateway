@@ -9,10 +9,19 @@ use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
 
 #[derive(Debug, Parser)]
-#[command(name = "mc-gateway", version, about = "Adds a line to the MOTD of every Minecraft server on a node")]
+#[command(
+    name = "mc-gateway",
+    version,
+    about = "Adds a line to the MOTD of every Minecraft server on a node"
+)]
 struct Args {
     /// Path to the configuration file.
-    #[arg(short, long, default_value = "/etc/mc-gateway/config.yaml", env = "MC_GATEWAY_CONFIG")]
+    #[arg(
+        short,
+        long,
+        default_value = "/etc/mc-gateway/config.yaml",
+        env = "MC_GATEWAY_CONFIG"
+    )]
     config: PathBuf,
 
     /// Validate the configuration and exit.
@@ -60,7 +69,10 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
         Ok(runtime) => runtime,
         Err(err) => {
             error!(%err, "cannot start the async runtime");
@@ -120,7 +132,10 @@ fn init_logging(config: &Config) {
     let filter = EnvFilter::try_from_env("RUST_LOG")
         .unwrap_or_else(|_| EnvFilter::new(format!("mc_gateway={level},warn")));
     // stderr, so stdout stays clean for the printed scripts.
-    let builder = fmt().with_env_filter(filter).with_target(false).with_writer(std::io::stderr);
+    let builder = fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .with_writer(std::io::stderr);
     match config.log.format {
         LogFormat::Json => builder.json().init(),
         LogFormat::Text => builder.init(),

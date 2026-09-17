@@ -127,7 +127,10 @@ pub struct Metrics {
 
 impl Default for Metrics {
     fn default() -> Self {
-        Self { enabled: false, bind: "127.0.0.1:9100".parse().expect("valid default") }
+        Self {
+            enabled: false,
+            bind: "127.0.0.1:9100".parse().expect("valid default"),
+        }
     }
 }
 
@@ -142,7 +145,11 @@ pub struct Log {
 
 impl Default for Log {
     fn default() -> Self {
-        Self { level: "info".into(), format: LogFormat::Text, client_ip: false }
+        Self {
+            level: "info".into(),
+            format: LogFormat::Text,
+            client_ip: false,
+        }
     }
 }
 
@@ -188,7 +195,10 @@ impl FromStr for PortRange {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let parse = |part: &str| -> Result<u16, String> {
-            let port: u16 = part.trim().parse().map_err(|_| format!("`{part}` is not a port"))?;
+            let port: u16 = part
+                .trim()
+                .parse()
+                .map_err(|_| format!("`{part}` is not a port"))?;
             if port == 0 {
                 return Err("port 0 cannot be intercepted".into());
             }
@@ -273,14 +283,18 @@ impl Config {
     pub fn load(path: impl AsRef<Path>) -> Result<Loaded, ConfigError> {
         let path = path.as_ref();
         let display = path.display().to_string();
-        let raw = std::fs::read_to_string(path)
-            .map_err(|source| ConfigError::Io { path: display.clone(), source })?;
+        let raw = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
+            path: display.clone(),
+            source,
+        })?;
         Self::parse(&raw, &display)
     }
 
     pub fn parse(raw: &str, origin: &str) -> Result<Loaded, ConfigError> {
-        let config: Config = serde_yaml_ng::from_str(raw)
-            .map_err(|source| ConfigError::Parse { path: origin.to_owned(), source })?;
+        let config: Config = serde_yaml_ng::from_str(raw).map_err(|source| ConfigError::Parse {
+            path: origin.to_owned(),
+            source,
+        })?;
         let warnings = config.validate()?;
         Ok(Loaded { config, warnings })
     }
@@ -337,7 +351,11 @@ impl Config {
             warnings.push("interception needs Linux; this build can only check the config".into());
         }
 
-        if errors.is_empty() { Ok(warnings) } else { Err(ConfigError::Invalid(errors)) }
+        if errors.is_empty() {
+            Ok(warnings)
+        } else {
+            Err(ConfigError::Invalid(errors))
+        }
     }
 }
 
@@ -357,15 +375,36 @@ mod tests {
         assert!(config.covers(30123));
         assert!(!config.covers(29999));
         assert_eq!(config.listen, default_listen());
-        assert_eq!(config.listen_v6, default_listen_v6(), "IPv6 is on by default");
+        assert_eq!(
+            config.listen_v6,
+            default_listen_v6(),
+            "IPv6 is on by default"
+        );
         assert_eq!(config.timeouts.handshake, Duration::from_secs(5));
-        assert!(!config.log.client_ip, "player addresses are not logged by default");
+        assert!(
+            !config.log.client_ip,
+            "player addresses are not logged by default"
+        );
     }
 
     #[test]
     fn port_ranges_parse_both_forms() {
-        let config = load("ports: [\"25565-25665\", 30000]\nmotd: {line2: x}\n").unwrap().config;
-        assert_eq!(config.ports, [PortRange { start: 25565, end: 25665 }, PortRange { start: 30000, end: 30000 }]);
+        let config = load("ports: [\"25565-25665\", 30000]\nmotd: {line2: x}\n")
+            .unwrap()
+            .config;
+        assert_eq!(
+            config.ports,
+            [
+                PortRange {
+                    start: 25565,
+                    end: 25665
+                },
+                PortRange {
+                    start: 30000,
+                    end: 30000
+                }
+            ]
+        );
         for bad in ["40000-30000", "0-10", "70000", "a-b"] {
             assert!(bad.parse::<PortRange>().is_err(), "{bad}");
         }
@@ -397,15 +436,25 @@ mod tests {
 
     #[test]
     fn durations_are_human_text() {
-        let config = load(&format!("{MINIMAL}timeouts:\n  handshake: 2s\n  connect: 750ms\n")).unwrap().config;
+        let config = load(&format!(
+            "{MINIMAL}timeouts:\n  handshake: 2s\n  connect: 750ms\n"
+        ))
+        .unwrap()
+        .config;
         assert_eq!(config.timeouts.handshake, Duration::from_secs(2));
         assert_eq!(config.timeouts.connect, Duration::from_millis(750));
     }
 
     #[test]
     fn typos_are_rejected() {
-        assert!(matches!(load(&format!("{MINIMAL}modt: {{}}\n")), Err(ConfigError::Parse { .. })));
-        assert!(matches!(load("motd: {line2: x}\n"), Err(ConfigError::Parse { .. })), "ports is required");
+        assert!(matches!(
+            load(&format!("{MINIMAL}modt: {{}}\n")),
+            Err(ConfigError::Parse { .. })
+        ));
+        assert!(
+            matches!(load("motd: {line2: x}\n"), Err(ConfigError::Parse { .. })),
+            "ports is required"
+        );
     }
 
     #[test]
@@ -423,14 +472,24 @@ mod tests {
     #[test]
     fn nothing_to_rewrite_is_worth_a_warning() {
         let loaded = load("ports: [30000]\n").unwrap();
-        assert!(loaded.warnings.iter().any(|w| w.contains("passes through untouched")));
+        assert!(
+            loaded
+                .warnings
+                .iter()
+                .any(|w| w.contains("passes through untouched"))
+        );
     }
 
     #[test]
     fn the_shipped_config_is_valid() {
-        let loaded = Config::parse(include_str!("../deploy/config.yaml"), "deploy/config.yaml").unwrap();
+        let loaded =
+            Config::parse(include_str!("../deploy/config.yaml"), "deploy/config.yaml").unwrap();
         assert!(loaded.config.motd.line2.is_some());
-        let unexpected: Vec<_> = loaded.warnings.iter().filter(|w| !w.contains("needs Linux")).collect();
+        let unexpected: Vec<_> = loaded
+            .warnings
+            .iter()
+            .filter(|w| !w.contains("needs Linux"))
+            .collect();
         assert!(unexpected.is_empty(), "{unexpected:?}");
     }
 }

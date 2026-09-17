@@ -102,7 +102,11 @@ enum Outcome {
     /// The server was unreachable and the gateway answered for it.
     Offline(&'static str),
     /// Piped through; `rewritten` tells whether the MOTD was changed.
-    Piped { kind: &'static str, rewritten: bool, bytes: Option<(u64, u64)> },
+    Piped {
+        kind: &'static str,
+        rewritten: bool,
+        bytes: Option<(u64, u64)>,
+    },
 }
 
 /// Handles one intercepted connection to `original`.
@@ -128,7 +132,11 @@ pub async fn handle(
         Outcome::Offline(answer) => {
             debug!(%client, server = %original, answer, "server offline, answered for it");
         }
-        Outcome::Piped { kind, rewritten, bytes } => {
+        Outcome::Piped {
+            kind,
+            rewritten,
+            bytes,
+        } => {
             let (to_server, to_client) = bytes.unwrap_or_default();
             debug!(
                 %client,
@@ -171,7 +179,14 @@ async fn serve(
 
     if motd.rewrites_anything() {
         let mut buf = Vec::with_capacity(512);
-        match sniff(&mut client, Some(&upstream), &mut buf, config.timeouts.handshake).await {
+        match sniff(
+            &mut client,
+            Some(&upstream),
+            &mut buf,
+            config.timeouts.handshake,
+        )
+        .await
+        {
             Sniff::ClientGone => return Outcome::ClientGone,
             Sniff::PassThrough | Sniff::Join => {}
             Sniff::Status => {
@@ -188,7 +203,13 @@ async fn serve(
         if kind == "status" {
             match relay_status(&mut client, &mut upstream, motd, config.timeouts.status).await {
                 Ok(changed) => rewritten = changed,
-                Err(_) => return Outcome::Piped { kind, rewritten, bytes: None },
+                Err(_) => {
+                    return Outcome::Piped {
+                        kind,
+                        rewritten,
+                        bytes: None,
+                    };
+                }
             }
         }
     }
@@ -196,7 +217,11 @@ async fn serve(
     // No idle timeout: this is someone else's server, and keepalives already
     // catch peers that vanished.
     let bytes = copy_bidirectional(&mut client, &mut upstream).await.ok();
-    Outcome::Piped { kind, rewritten, bytes }
+    Outcome::Piped {
+        kind,
+        rewritten,
+        bytes,
+    }
 }
 
 /// Answers for a server that did not accept the connection: the offline MOTD
@@ -209,7 +234,11 @@ async fn answer_offline(mut client: TcpStream, config: &Config) -> Outcome {
             observe::status_request();
             observe::offline_answered();
             let document = motd::offline_status(&config.offline, &config.motd);
-            if client.write_all(&encode_status_response(&document)).await.is_err() {
+            if client
+                .write_all(&encode_status_response(&document))
+                .await
+                .is_err()
+            {
                 return Outcome::ClientGone;
             }
             answer_ping(&mut client, &buf, config.timeouts.status).await;
@@ -423,14 +452,21 @@ mod tests {
 
     fn handshake(next_state: i32) -> Vec<u8> {
         let mut w = Writer::new();
-        w.varint(767).string("node.example.net").u16(30123).varint(next_state);
+        w.varint(767)
+            .string("node.example.net")
+            .u16(30123)
+            .varint(next_state);
         encode_packet(0x00, w.as_slice())
     }
 
     #[test]
     fn a_status_ping_is_recognised_only_once_the_request_is_there() {
         let mut buf = handshake(1);
-        assert_eq!(classify(&buf), None, "handshake alone: wait for the request");
+        assert_eq!(
+            classify(&buf),
+            None,
+            "handshake alone: wait for the request"
+        );
         buf.extend_from_slice(&encode_packet(0x00, &[]));
         assert_eq!(classify(&buf), Some(Sniff::Status));
     }

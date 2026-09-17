@@ -39,7 +39,9 @@ pub struct FakeServer {
 
 impl FakeServer {
     pub async fn start(behaviour: Behaviour) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind fake server");
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake server");
         let address = listener.local_addr().expect("local addr");
         let received = Arc::new(Mutex::new(Vec::new()));
         let log = Arc::clone(&received);
@@ -56,7 +58,9 @@ impl FakeServer {
                     }
 
                     let mut head = vec![0u8; 8192];
-                    let Ok(read) = stream.read(&mut head).await else { return };
+                    let Ok(read) = stream.read(&mut head).await else {
+                        return;
+                    };
                     if read == 0 {
                         return;
                     }
@@ -72,7 +76,11 @@ impl FakeServer {
                                 Ok(n) => buf.extend_from_slice(&chunk[..n]),
                             }
                         }
-                        if stream.write_all(&encode_status_response(json)).await.is_err() {
+                        if stream
+                            .write_all(&encode_status_response(json))
+                            .await
+                            .is_err()
+                        {
                             return;
                         }
                     }
@@ -109,7 +117,9 @@ impl FakeServer {
 }
 
 fn has_status_request(buf: &[u8]) -> bool {
-    let Ok(handshake) = decode_frame(buf) else { return false };
+    let Ok(handshake) = decode_frame(buf) else {
+        return false;
+    };
     matches!(decode_frame(&buf[handshake.total_len..]), Ok(frame) if frame.id == STATUS_REQUEST_ID)
 }
 
@@ -126,7 +136,10 @@ pub fn paper_status(motd: &str, online: u32) -> String {
 
 pub fn handshake(next: NextState) -> Vec<u8> {
     let mut body = Writer::new();
-    body.varint(767).string("node.example.net").u16(30123).varint(next.as_i32());
+    body.varint(767)
+        .string("node.example.net")
+        .u16(30123)
+        .varint(next.as_i32());
     encode_packet(HANDSHAKE_ID, body.as_slice())
 }
 
@@ -144,7 +157,10 @@ pub async fn read_packet(stream: &mut TcpStream) -> Option<(i32, Vec<u8>)> {
         if let Ok(frame) = decode_frame_limited(&buf, 4 * 1024 * 1024) {
             return Some((frame.id, frame.body.to_vec()));
         }
-        let read = time::timeout(Duration::from_secs(5), stream.read(&mut chunk)).await.ok()?.ok()?;
+        let read = time::timeout(Duration::from_secs(5), stream.read(&mut chunk))
+            .await
+            .ok()?
+            .ok()?;
         if read == 0 {
             return None;
         }

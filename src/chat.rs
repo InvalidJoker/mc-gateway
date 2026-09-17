@@ -95,7 +95,9 @@ struct Style {
 impl Style {
     /// Applies a component's own fields on top of what it inherited.
     fn inherit(&self, object: &serde_json::Map<String, Value>) -> Style {
-        let flag = |name: &str, current: bool| object.get(name).and_then(Value::as_bool).unwrap_or(current);
+        let flag = |name: &str, current: bool| {
+            object.get(name).and_then(Value::as_bool).unwrap_or(current)
+        };
         Style {
             color: object
                 .get("color")
@@ -229,7 +231,10 @@ mod tests {
 
     #[test]
     fn translates_legacy_codes() {
-        assert_eq!(translate_colors("&aHello &lWorld"), "\u{a7}aHello \u{a7}lWorld");
+        assert_eq!(
+            translate_colors("&aHello &lWorld"),
+            "\u{a7}aHello \u{a7}lWorld"
+        );
         assert_eq!(translate_colors("100&& counted"), "100& counted");
         assert_eq!(translate_colors("&zunknown"), "&zunknown");
     }
@@ -245,7 +250,10 @@ mod tests {
 
     #[test]
     fn a_plain_component_needs_no_codes() {
-        assert_eq!(to_legacy(&json!({"text": "A Minecraft Server"})), "A Minecraft Server");
+        assert_eq!(
+            to_legacy(&json!({"text": "A Minecraft Server"})),
+            "A Minecraft Server"
+        );
         assert_eq!(to_legacy(&json!("bare string")), "bare string");
     }
 
